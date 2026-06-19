@@ -1,0 +1,9 @@
+﻿.venv/
+algorithms_test/
+uv.lock
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+.mypy_cache/
+.idea/
