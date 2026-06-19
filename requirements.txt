@@ -1,0 +1,10 @@
+# Core
+PyMuPDF>=1.24          # imports as `fitz` — do NOT also install the unrelated `fitz` pkg
+Pillow>=10
+numpy>=1.26
+opencv-python>=4.9     # use opencv-python-headless on servers without a display
+scikit-image>=0.22
+# Scanned-mode dewarp (optional; Unwarp degrades gracefully if absent)
+docuwarp
+onnxruntime>=1.17
+# tkinter ships with CPython on Windows/macOS; on Linux: apt install python3-tk
