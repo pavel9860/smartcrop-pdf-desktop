@@ -32,7 +32,6 @@ THEMES: Dict[str, Dict[str, str]] = {
 
 RESOLUTIONS: Sequence[str] = (
     "Original (No Resize)",
-    "2K monitor (2560×1440)",
     "Amazon Kindle Scribe (1860×2480)",
     "Amazon Kindle Oasis (1264×1680)",
     "Amazon Kindle Paperwhite (1080×1440)",

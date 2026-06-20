@@ -1,6 +1,6 @@
 [project]
 name = "smartcropdf"
 version = "0.1.0"
-description = "Add your description here"
+description = "Simple tool to make books comfortabe to read"
 requires-python = ">=3.12"
 dependencies = []
