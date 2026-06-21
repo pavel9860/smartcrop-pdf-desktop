@@ -2,8 +2,9 @@
 Pure raster-processing layer. No Tkinter / no PyMuPDF here — every function takes
 and returns numpy arrays so the whole module is unit-testable headless.
 
-Validated against cv2 4.13 / skimage 0.26 / numpy 2.4 / onnxruntime 1.24.
-docuwarp is imported lazily inside `unwarp_bgr`; absence degrades gracefully.
+Self-contained: depends only on cv2 + numpy (Sauvola binarization is implemented
+locally via box filters — see `_sauvola_threshold`). docuwarp is imported lazily
+inside `unwarp_bgr`; absence degrades gracefully.
 """
 from __future__ import annotations
 
@@ -11,7 +12,24 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
-from skimage.filters import threshold_sauvola
+
+
+def _sauvola_threshold(image: np.ndarray, window_size: int, k: float,
+                       r: float = 127.5) -> np.ndarray:
+    """Per-pixel Sauvola threshold T = m·(1 + k·(s/R − 1)), where m and s are the
+    local mean and standard deviation over a `window_size`² window and R = `r` is
+    the assumed dynamic range of s (127.5 for 8-bit). Computed with cv2 box filters
+    (equivalent to the integral-image formulation) so no scikit-image is required.
+    Returns a float threshold map the caller compares against (`ink = img < T`).
+    """
+    win = (int(window_size) | 1, int(window_size) | 1)
+    img = image.astype(np.float64)
+    mean = cv2.boxFilter(img, ddepth=-1, ksize=win, normalize=True,
+                         borderType=cv2.BORDER_REFLECT_101)
+    sq_mean = cv2.boxFilter(img * img, ddepth=-1, ksize=win, normalize=True,
+                            borderType=cv2.BORDER_REFLECT_101)
+    std = np.sqrt(np.clip(sq_mean - mean * mean, 0.0, None))
+    return mean * (1.0 + k * ((std / r) - 1.0))
 
 # Discrete clean strength → (sauvola_k, min_component_area_at_upscale1). Lower k = thicker
 # strokes; higher min_area = more despeckle. Deliberately 3 levels (continuous = false
@@ -81,7 +99,7 @@ def clean_document_bilevel(
     bg = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, se)
     flat = np.clip(cv2.divide(gray.astype(np.float32), bg.astype(np.float32) + 1e-6) * 255.0,
                    0, 255).astype(np.uint8)
-    thr = threshold_sauvola(flat, window_size=sauvola_window, k=cfg["k"])
+    thr = _sauvola_threshold(flat, sauvola_window, cfg["k"])
     text = (flat < thr).astype(np.uint8)
 
     if min_area > 0:

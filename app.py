@@ -9,6 +9,7 @@ deskew-only (no mesh dewarp model); export rasterizes.
 from __future__ import annotations
 
 import io
+import os
 import queue
 import random
 import re
@@ -23,13 +24,15 @@ import fitz
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-from smartcrop.constants import RESOLUTIONS, THEMES
+import imaging
+from constants import RESOLUTIONS, THEMES
+from geometry import (Box, MIN_RECT, HANDLE_CURSOR, auto_crop_rect, clamp_box,
+                      hit_handle, move_box, point_in_box, resize_by_handle, union_box)
 
 SRC_DPI = 200.0
 NORMAL_DPI = 150.0
 HANDLE_R = 8
 HANDLE_SLACK = 6
-MIN_RECT = 5.0
 CANVAS_MARGIN = 40
 PROGRESS_POLL_MS = 40
 MODE_TEXT_MIN = 8
@@ -37,107 +40,18 @@ MODE_IMG_COVER = 0.60
 DESKEW_MAX_DEG = 15.0
 BORDER_FRAC = 0.02
 MIN_COMP_FRAC = 2.5e-4
+DETECT_MAX_PX = 1400          # cap raster size for content detection (speed, #12)
 SYNTH_PAGES = 24
 
-# Windows 11 / Fluent 2 palette
-PRIMARY = ("#0F6CBD", "#3A96DD")          # accent fill
-PRIMARY_HOVER = ("#115EA3", "#4FA6E0")
-PRIMARY_TEXT = ("white", "#0A0A0A")        # text on accent (dark accent → near-black)
-SECONDARY = ("#FBFBFB", "#3B3B40")         # neutral control fill
-SECONDARY_HOVER = ("#F0F0F0", "#45454B")
-SECONDARY_TEXT = ("#1A1A1A", "#FFFFFF")    # always legible on neutral fill
-CARD = ("#FFFFFF", "#272729")
-CARD_BORDER = ("#E5E5E8", "#3A3A3E")
-MUTED = ("#5A5A60", "#A8A8B0")
+# Palette + help text (sibling modules).
+from theme import (ACCENT, ACCENT_HOVER, ACCENT_TEXT, CARD, CARD_BORDER,
+                   CROP_BLUE, MUTED, SECONDARY, SECONDARY_HOVER, SECONDARY_TEXT,
+                   SEG_UNSEL, SPLIT_BLUE, STATUS_FG)
+from help_content import HELP_SECTIONS, OFFSET_TIP, SPLIT_TIP
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  PURE GEOMETRY / IMAGING
-# ════════════════════════════════════════════════════════════════════════════
-class Box:
-    __slots__ = ("x0", "y0", "x1", "y1")
-
-    def __init__(self, x0, y0, x1, y1):
-        self.x0, self.y0, self.x1, self.y1 = float(x0), float(y0), float(x1), float(y1)
-
-    @property
-    def width(self):
-        return self.x1 - self.x0
-
-    @property
-    def height(self):
-        return self.y1 - self.y0
-
-
-def clamp_box(b: Box, w: float, h: float) -> Box:
-    x0 = max(0.0, min(b.x0, w - MIN_RECT))
-    y0 = max(0.0, min(b.y0, h - MIN_RECT))
-    x1 = min(w, max(b.x1, x0 + MIN_RECT))
-    y1 = min(h, max(b.y1, y0 + MIN_RECT))
-    return Box(x0, y0, x1, y1)
-
-
-HANDLE_EDGES = {"NW": ("x0", "y0"), "N": ("y0",), "NE": ("x1", "y0"), "E": ("x1",),
-                "SE": ("x1", "y1"), "S": ("y1",), "SW": ("x0", "y1"), "W": ("x0",)}
-HANDLE_CURSOR = {"NW": "size_nw_se", "SE": "size_nw_se", "NE": "size_ne_sw", "SW": "size_ne_sw",
-                 "N": "sb_v_double_arrow", "S": "sb_v_double_arrow",
-                 "E": "sb_h_double_arrow", "W": "sb_h_double_arrow"}
-
-
-def ink_box(gray: np.ndarray) -> Optional[Box]:
-    h, w = gray.shape[:2]
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    n, lbl, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
-    bm = int(round(BORDER_FRAC * min(h, w)))
-    min_area = max(8.0, MIN_COMP_FRAC * h * w)
-    keep = [i for i in range(1, n)
-            if stats[i, cv2.CC_STAT_AREA] >= min_area and not (
-                stats[i, 0] <= bm or stats[i, 1] <= bm
-                or stats[i, 0] + stats[i, 2] >= w - bm or stats[i, 1] + stats[i, 3] >= h - bm)]
-    if not keep:
-        keep = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= min_area]
-    if not keep:
-        return None
-    mask = np.isin(lbl, keep)
-    ys, xs = np.where(mask.any(axis=1))[0], np.where(mask.any(axis=0))[0]
-    if not len(xs):
-        return None
-    return Box(float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1))
-
-
-def estimate_skew(gray: np.ndarray) -> float:
-    _, bw = cv2.threshold(255 - gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    pts = cv2.findNonZero(bw)
-    if pts is None or len(pts) < 50:
-        return 0.0
-    ang = cv2.minAreaRect(pts)[-1]
-    ang = ang + 90 if ang < -45 else (ang - 90 if ang > 45 else ang)
-    return float(np.clip(ang, -DESKEW_MAX_DEG, DESKEW_MAX_DEG))
-
-
-def deskew(bgr: np.ndarray, angle: float) -> np.ndarray:
-    if abs(angle) < 0.05:
-        return bgr
-    h, w = bgr.shape[:2]
-    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
-    return cv2.warpAffine(bgr, m, (w, h), flags=cv2.INTER_CUBIC,
-                          borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-
-
-def bilevel_simple(bgr: np.ndarray, strength: int) -> np.ndarray:
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    block = {1: 75, 2: 51, 3: 31}[strength] | 1
-    out = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                cv2.THRESH_BINARY, block, {1: 18, 2: 12, 3: 6}[strength])
-    return cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
-
-
-def sharpen_gray_simple(bgr: np.ndarray, strength: int) -> np.ndarray:
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    amount = {1: 0.6, 2: 1.1, 3: 1.6}[strength]
-    blur = cv2.GaussianBlur(gray, (0, 0), 2.0)
-    sharp = cv2.addWeighted(gray, 1.0 + amount, blur, -amount, 0)
-    return cv2.cvtColor(np.clip(sharp, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+# Geometry → geometry.py · raster processing → imaging.py
+_CLEAN_AMOUNT = {1: 0.6, 2: 1.1, 3: 1.6}      # grayscale-filter unsharp amount per strength
 
 
 def _pil_to_bytes(img: Image.Image) -> bytes:
@@ -146,121 +60,11 @@ def _pil_to_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-HELP_SECTIONS = [
-    ("modes", "Modes", "On load each page is classified Normal (vector) or Scanned "
-     "(raster) from text length + image coverage; the document mode is a majority vote, "
-     "biased to Normal on ties. The badge on the Document & State header shows the result; "
-     "click it to override manually (this resets detection and the raster cache)."),
-    ("loading", "Loading", "Load PDF (Ctrl+O) opens a file and classifies it. The badge "
-     "and the Scan Processing section follow the detected mode."),
-    ("pages", "Pages", "All / Odd / Even (1-indexed) or Selected, which reveals a field "
-     "for a list with inclusive ranges, e.g. 1,3,5-9,12. The resolved set drives detect, "
-     "scan processing, apply and rotate."),
-    ("detect", "Auto-detect & offsets", "Auto-detect computes a per-page content box, then "
-     "one union box across the Pages selection. Anchor Left/Top pick the per-page detected "
-     "edge (ON) or the union edge (OFF). L/T/R/B are percent-of-page offsets, one per edge, "
-     "so dragging a handle never moves the opposite edge. Keep ratio holds an aspect "
-     "(editable field) by adjusting Bottom when Right changes."),
-    ("scan", "Scan processing", "Scanned mode only. Dewarp & Deskew straightens pages. B/W "
-     "and Grayscale filters are mutually exclusive; Strength 1-3 applies to whichever is "
-     "active. Nothing runs without a button press; re-running starts from the source."),
-    ("split", "Split", "1 / 2 / 4 output pages from user-drawn rectangles in reading order. "
-     "Enabling split disables Detect, anchors and offsets. Drag a border or the whole "
-     "rectangle; the Same size switch keeps every box the same size."),
-    ("resize", "Resize", "Applied last, after crop: Original keeps native size, or pick a "
-     "device preset / Custom width × height."),
-    ("export", "Export", "Apply Crop commits the crop for the Pages selection; Export PDF "
-     "(Ctrl+S) writes the result. Undo/Redo cover crop, rotate, dewarp and clean."),
-    ("shortcuts", "Shortcuts", "Ctrl+O Load · Ctrl+Enter Apply · Ctrl+S Export · Ctrl+Z "
-     "Undo · Ctrl+Y Redo · ←/→, PgUp/PgDn page · Ctrl+= / Ctrl+- scale the UI · Enter in "
-     "the page field jumps."),
-    ("about", "About", "SmartCrop PDF — UI prototype (CustomTkinter). Crops, straightens "
-     "and cleans PDFs and scans for e-readers."),
-]
-SPLIT_TIP = {1: "Single crop — one rectangle, one output page per source page.",
-             2: "Two areas → 2 output pages, left-to-right reading order (①②).",
-             4: "Four quadrants → 4 output pages in reading order (①②③④)."}
-OFFSET_TIP = {"L": "Left edge offset — percent of page width (range ±100, step 0.1).",
-              "T": "Top edge offset — percent of page height (range ±100, step 0.1).",
-              "R": "Right edge offset — percent of page width (range ±100, step 0.1).",
-              "B": "Bottom edge offset — percent of page height (range ±100, step 0.1)."}
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  TOOLTIP
-# ════════════════════════════════════════════════════════════════════════════
-class ToolTip:
-    def __init__(self, widget, text: str, app):
-        self.w, self.text, self.app = widget, text, app
-        self.win = None
-        self.job = None
-        try:
-            widget.bind("<Enter>", self._enter, add="+")
-            widget.bind("<Leave>", self._leave, add="+")
-            widget.bind("<ButtonPress>", self._leave, add="+")
-        except (NotImplementedError, tk.TclError):
-            pass   # some CTk composite widgets reject .bind; tooltip silently skipped
-
-    def _enter(self, _e=None):
-        self.job = self.w.after(450, self._show)
-
-    def _show(self):
-        try:
-            x = self.w.winfo_rootx() + 14
-            y = self.w.winfo_rooty() + self.w.winfo_height() + 6
-        except tk.TclError:
-            return
-        self.win = tw = tk.Toplevel(self.w)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        try:
-            tw.attributes("-topmost", True)
-        except tk.TclError:
-            pass
-        dark = ctk.get_appearance_mode() == "Dark"
-        lbl = tk.Label(tw, text=self.text, justify="left", wraplength=320,
-                       bg="#2b2b30" if dark else "#f4f4f6", fg="#ededee" if dark else "#1a1a1a",
-                       relief="solid", bd=1, padx=10, pady=6, font=("Segoe UI", 12))
-        lbl.pack()
-
-    def _leave(self, _e=None):
-        if self.job:
-            self.w.after_cancel(self.job)
-            self.job = None
-        if self.win:
-            try:
-                self.win.destroy()
-            except tk.TclError:
-                pass
-            self.win = None
-
-
-class Spin(ctk.CTkFrame):
-    """Compact offset stepper: bigger-font entry, wheel + arrow-key stepping (±100, 0.1)."""
-    def __init__(self, master, var: tk.DoubleVar, app, lo=-100.0, hi=100.0, step=0.1, width=64):
-        super().__init__(master, fg_color="transparent")
-        self.var, self.lo, self.hi, self.step = var, lo, hi, step
-        self.entry = ctk.CTkEntry(self, textvariable=var, width=width, justify="center",
-                                  font=app.font_offset)
-        self.entry.pack(fill="x")
-        for ev in ("<MouseWheel>",):
-            self.entry.bind(ev, self._wheel)
-        self.entry.bind("<Up>", lambda _e: self._bump(self.step))
-        self.entry.bind("<Down>", lambda _e: self._bump(-self.step))
-
-    def _wheel(self, e):
-        self._bump(self.step if e.delta > 0 else -self.step)
-        return "break"
-
-    def _bump(self, d):
-        try:
-            v = float(self.var.get())
-        except (tk.TclError, ValueError):
-            v = 0.0
-        self.var.set(round(min(self.hi, max(self.lo, v + d)), 1))
-
-    def configure_state(self, state):
-        self.entry.configure(state=state)
+from widgets import ToolTip, Spin
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -295,6 +99,7 @@ class TestUIApp:
     # ── state ────────────────────────────────────────────────────────────
     def _init_state(self) -> None:
         self.doc: Optional[fitz.Document] = None
+        self._pdf_path: Optional[str] = None
         self._pt_size: List[Tuple[float, float]] = []
         self.current_page = 0
         self.scale = 1.0
@@ -318,7 +123,10 @@ class TestUIApp:
         self.crop_rects: List[Box] = []
         self._rect_ratio: List[Optional[float]] = []
         self._drag: Optional[dict] = None
+        self._draw_rect: Optional[Box] = None       # live rubber-band while drawing a new crop
         self._out_pages: List[Image.Image] = []
+        self._applied: Dict[int, List[Box]] = {}    # page → committed crop box(es) = saved state
+        self._rotation: Dict[int, int] = {}         # page → rotation in degrees CW (#8, #13)
 
         self.left_off = tk.DoubleVar(value=0.0)
         self.top_off = tk.DoubleVar(value=0.0)
@@ -336,7 +144,7 @@ class TestUIApp:
 
         self.history: List[dict] = []
         self.redo_stack: List[dict] = []
-        self.undo_depth_var = tk.StringVar(value="2")
+        self.undo_depth_var = tk.StringVar(value="4")
 
         self.theme_choice = tk.StringVar(value="Dark")
         self.confirm_overwrite = tk.BooleanVar(value=True)
@@ -360,9 +168,9 @@ class TestUIApp:
                                     bg=t["SASH"], sashrelief="flat")
         self.paned.pack(fill="both", expand=True, padx=10, pady=10)
 
-        left = ctk.CTkFrame(self.paned, fg_color="transparent", width=410)
-        self.paned.add(left, minsize=360, stretch="never")
-        self._build_bottom_bar(left)
+        left = ctk.CTkFrame(self.paned, fg_color="transparent", width=440)
+        left.pack_propagate(False)                    # hold the panel width (no bottom-bar anchor now)
+        self.paned.add(left, minsize=380, stretch="never", width=440)
         self.controls = ctk.CTkScrollableFrame(left, fg_color="transparent")
         self.controls.pack(side="top", fill="both", expand=True)
 
@@ -373,6 +181,7 @@ class TestUIApp:
         self._build_pages_section()
         self._build_resize_section()
         self._build_exec_section()
+        self._build_bottom_bar()                     # Settings/Help + nav scroll with the rest (B#1)
 
         right = ctk.CTkFrame(self.paned, fg_color=CARD, corner_radius=12)
         self.paned.add(right, minsize=480, stretch="always")
@@ -385,9 +194,10 @@ class TestUIApp:
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Configure>", lambda _e: self._schedule_render(50))
 
-        self.status = ctk.CTkLabel(right, text="", font=self.font_mono, text_color=MUTED,
-                                   justify="right", fg_color="transparent")
-        self.status.place(relx=1.0, rely=1.0, x=-14, y=-10, anchor="se")
+        self.status = ctk.CTkLabel(right, text="", text_color=STATUS_FG, justify="right",
+                                   font=ctk.CTkFont(self.sys_mono, self.fs - 1),
+                                   fg_color=CARD, corner_radius=6)
+        self.status.place(relx=1.0, rely=1.0, x=-12, y=-10, anchor="se")
         self._build_overlay(right)
         self._refresh_mode_badge()
         self._sync_split_ui()
@@ -408,24 +218,31 @@ class TestUIApp:
         return body
 
     def _btn(self, master, text, cmd, primary=False, **kw):
-        fg = PRIMARY if primary else SECONDARY
-        hov = PRIMARY_HOVER if primary else SECONDARY_HOVER
-        txt = PRIMARY_TEXT if primary else SECONDARY_TEXT
+        # All buttons look neutral at rest; an "active" highlight is applied separately via
+        # _set_active (#16). `primary` kept for call-site intent but no longer fills.
         kw.setdefault("height", 36)
-        kw.setdefault("border_width", 0 if primary else 1)
+        kw.setdefault("border_width", 1)
         kw.setdefault("border_color", CARD_BORDER)
-        return ctk.CTkButton(master, text=text, command=cmd, fg_color=fg, hover_color=hov,
-                             text_color=txt, font=self.font_base, corner_radius=8, **kw)
+        return ctk.CTkButton(master, text=text, command=cmd, fg_color=SECONDARY,
+                             hover_color=SECONDARY_HOVER, text_color=SECONDARY_TEXT,
+                             font=self.font_base, corner_radius=8, **kw)
+
+    def _set_active(self, btn, on: bool):
+        """Highlight a button only while it represents an active state (#16)."""
+        btn.configure(fg_color=ACCENT if on else SECONDARY,
+                      text_color=ACCENT_TEXT if on else SECONDARY_TEXT,
+                      hover_color=ACCENT_HOVER if on else SECONDARY_HOVER)
 
     def _seg_tips(self, seg: ctk.CTkSegmentedButton, mapping: Dict[str, str]):
         for val, btn in getattr(seg, "_buttons_dict", {}).items():
             if val in mapping:
                 ToolTip(btn, mapping[val], self)
 
-    def _build_bottom_bar(self, host) -> None:
-        bar = ctk.CTkFrame(host, fg_color=CARD, corner_radius=12, border_width=1,
+    def _build_bottom_bar(self) -> None:
+        # Part of the scrollable column (scrolls with everything else, B#1), not pinned.
+        bar = ctk.CTkFrame(self.controls, fg_color=CARD, corner_radius=12, border_width=1,
                            border_color=CARD_BORDER)
-        bar.pack(side="bottom", fill="x", pady=(8, 0))
+        bar.pack(fill="x", padx=4, pady=(2, 8))
         row1 = ctk.CTkFrame(bar, fg_color="transparent")
         row1.pack(fill="x", padx=10, pady=(10, 4))
         bs = self._btn(row1, "⚙  Settings", self.open_settings)
@@ -434,30 +251,34 @@ class TestUIApp:
         bh = self._btn(row1, "?  Help", self.open_help)
         bh.pack(side="left", expand=True, fill="x", padx=(4, 0))
         ToolTip(bh, "Quick-start guide with an interactive table of contents.", self)
+        # Page nav: arrows hug the edges, the page box gets the middle space so the
+        # current/total page numbers stay fully visible up to 4 digits (#3).
         row2 = ctk.CTkFrame(bar, fg_color="transparent")
         row2.pack(fill="x", padx=10, pady=(0, 10))
+        row2.columnconfigure(0, weight=0)
         row2.columnconfigure(1, weight=1)
-        self._btn(row2, "◀", self.prev_page, width=44).grid(row=0, column=0, padx=(0, 6))
+        row2.columnconfigure(2, weight=0)
+        self._btn(row2, "◀", self.prev_page, width=46).grid(row=0, column=0, sticky="w")
         pagebox = ctk.CTkFrame(row2, fg_color="transparent")
-        pagebox.grid(row=0, column=1)
+        pagebox.grid(row=0, column=1, sticky="")
         self.page_var = tk.StringVar(value="1")
-        pe = ctk.CTkEntry(pagebox, textvariable=self.page_var, width=56, justify="center",
+        pe = ctk.CTkEntry(pagebox, textvariable=self.page_var, width=64, justify="center",
                           font=self.font_base)
         pe.pack(side="left")
         pe.bind("<Return>", self.jump_to_page)
         self.page_total = ctk.CTkLabel(pagebox, text="/ 0", font=self.font_base, text_color=MUTED)
         self.page_total.pack(side="left", padx=(8, 0))
-        self._btn(row2, "▶", self.next_page, width=44).grid(row=0, column=2, padx=(6, 0))
+        self._btn(row2, "▶", self.next_page, width=46).grid(row=0, column=2, sticky="e")
 
     def _build_doc_section(self) -> None:
         def badge(head):
+            # A detection *marker*, not a button: same pill look, but not interactive (#3).
             self.mode_badge = ctk.CTkLabel(head, text="NORMAL", font=self.font_badge,
                                            corner_radius=11, width=88, height=26,
                                            text_color="white")
-            self.mode_badge.pack(side="right")
-            self.mode_badge.bind("<Button-1>", lambda _e: self._toggle_mode())
-            ToolTip(self.mode_badge, "Auto-detected document mode. Click to override "
-                    "(Normal ⇄ Scanned); resets detection and the raster cache.", self)
+            self.mode_badge.pack(side="right", padx=(16, 0))     # gap after the title (#4)
+            ToolTip(self.mode_badge, "Detected document mode (Normal = vector, "
+                    "Scanned = raster). Set automatically on load.", self)
         body = self._card("Document & State", badge)
         bl = self._btn(body, "\U0001F4C2   Load PDF", self.load_pdf, primary=True, height=40)
         bl.pack(fill="x", pady=(2, 8))
@@ -471,7 +292,7 @@ class TestUIApp:
         br = self._btn(row, "Redo ↪", self.redo)
         br.grid(row=0, column=1, sticky="ew", padx=4)
         ToolTip(br, "Redo (Ctrl+Y).", self)
-        brs = self._btn(row, "⟲ Reset", self.reset_page)
+        brs = self._btn(row, "⟲ Reset", self.reset_document)
         brs.grid(row=0, column=2, sticky="ew", padx=(4, 0))
         ToolTip(brs, "Reload the current page from its cached source.", self)
 
@@ -495,10 +316,10 @@ class TestUIApp:
         crow = ctk.CTkFrame(clean, fg_color="transparent")
         crow.pack(fill="x", padx=12)
         crow.columnconfigure((0, 1), weight=1)
-        self.btn_bw = self._btn(crow, "B/W Filter", lambda: self.set_clean_mode("bw"))
+        self.btn_bw = self._btn(crow, "B/W", lambda: self.set_clean_mode("bw"))
         self.btn_bw.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ToolTip(self.btn_bw, "Bilevel black/white threshold filter. Press again to turn off.", self)
-        self.btn_gray = self._btn(crow, "Grayscale Filter", lambda: self.set_clean_mode("gray"))
+        ToolTip(self.btn_bw, "B/W filter — bilevel black/white threshold. Press again to turn off.", self)
+        self.btn_gray = self._btn(crow, "Grayscale", lambda: self.set_clean_mode("gray"))
         self.btn_gray.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         ToolTip(self.btn_gray, "Flatten + sharpen, keeps continuous tone. Mutually exclusive "
                 "with B/W.", self)
@@ -506,7 +327,8 @@ class TestUIApp:
             anchor="w", padx=12, pady=(8, 2))
         self.strength_seg = ctk.CTkSegmentedButton(
             clean, values=["1", "2", "3"], font=self.font_base,
-            selected_color=PRIMARY, selected_hover_color=PRIMARY_HOVER,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            fg_color=SEG_UNSEL, text_color=ACCENT_TEXT,
             command=lambda v: self.set_clean_strength(int(v)))
         self.strength_seg.set("2")
         self.strength_seg.pack(fill="x", padx=12, pady=(0, 12))
@@ -518,7 +340,8 @@ class TestUIApp:
         body = self._card("Split Into")
         self.split_seg = ctk.CTkSegmentedButton(
             body, values=["1", "2", "4"], font=self.font_base,
-            selected_color=PRIMARY, selected_hover_color=PRIMARY_HOVER,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            fg_color=SEG_UNSEL, text_color=ACCENT_TEXT,
             command=lambda v: self.set_split(int(v)))
         self.split_seg.set("1")
         self.split_seg.pack(fill="x")
@@ -545,7 +368,7 @@ class TestUIApp:
         ratio_row.pack(fill="x", pady=4)
         self.sw_ratio = ctk.CTkSwitch(ratio_row, text="Keep ratio", variable=self.keep_ratio_var,
                                       command=self._on_ratio_toggle, font=self.font_base,
-                                      progress_color=PRIMARY)
+                                      progress_color=ACCENT)
         self.sw_ratio.pack(side="left")
         self.ratio_entry = ctk.CTkEntry(ratio_row, textvariable=self.ratio_var, width=72,
                                         justify="center", font=self.font_base)
@@ -578,7 +401,7 @@ class TestUIApp:
         row = ctk.CTkFrame(master, fg_color="transparent")
         row.pack(fill="x", pady=4)
         sw = ctk.CTkSwitch(row, text=text, variable=var, command=cmd, font=self.font_base,
-                           progress_color=PRIMARY)
+                           progress_color=ACCENT)
         sw.pack(side="left")
         ToolTip(row, tip, self)
         row.switch = sw
@@ -588,7 +411,8 @@ class TestUIApp:
         body = self._card("Pages")
         self.pages_seg = ctk.CTkSegmentedButton(
             body, values=["All", "Odd", "Even", "Selected"], font=self.font_base,
-            selected_color=PRIMARY, selected_hover_color=PRIMARY_HOVER,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            fg_color=SEG_UNSEL, text_color=ACCENT_TEXT,
             command=self.set_pages_mode)
         self.pages_seg.set("All")
         self.pages_seg.pack(fill="x")
@@ -599,16 +423,25 @@ class TestUIApp:
             "Selected": "Reveal a field for a custom list: 1,3,5-9,12 (commas + ranges)."})
         self.select_row = ctk.CTkFrame(body, fg_color="transparent")
         ctk.CTkLabel(self.select_row, text="Pattern", font=self.font_base).pack(side="left")
+        bcur = self._btn(self.select_row, "⦿ Current", self._select_current, width=96, height=30)
+        bcur.pack(side="right", padx=(8, 0))          # right at the tab edge (#9, #12)
+        ToolTip(bcur, "Set the pattern to the current page and keep it selected.", self)
         se = ctk.CTkEntry(self.select_row, textvariable=self.select_var, font=self.font_mono)
         se.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        ToolTip(se, "1-indexed pages with commas and inclusive ranges: 1,3,5-9,12", self)
+        ToolTip(se, "Pages 1,3,5-9,12 — commas, ranges (a-b) and slices (a:b) accepted.", self)
+
+    def _select_current(self):
+        self.select_var.set(str(self.current_page + 1))
+        if self.pages_mode != "select":
+            self.set_pages_mode("Selected")
+        self.render_page()
 
     def _build_resize_section(self) -> None:
         body = self._card("Resize")
         cb = ctk.CTkOptionMenu(body, variable=self.resize_var, values=list(RESOLUTIONS),
                                command=lambda _v: self._sync_resize_ui(), font=self.font_base,
                                fg_color=SECONDARY, button_color=SECONDARY_HOVER,
-                               button_hover_color=PRIMARY, text_color=SECONDARY_TEXT)
+                               button_hover_color=ACCENT, text_color=SECONDARY_TEXT)
         cb.pack(fill="x")
         ToolTip(cb, "Output size, applied last (after crop).", self)
         self.custom_row = ctk.CTkFrame(body, fg_color="transparent")
@@ -624,13 +457,16 @@ class TestUIApp:
         body.pack(fill="x", padx=4, pady=(2, 10))
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(0, 6))
-        row.columnconfigure((0, 1), weight=1)
-        self.btn_apply = self._btn(row, "✂  Apply Crop", self.apply_crop, primary=True, height=42)
+        row.columnconfigure((0, 1, 2), weight=1, uniform="exec")
+        self.btn_apply = self._btn(row, "✂  Crop", self.apply_crop, primary=True, height=42)
         self.btn_apply.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ToolTip(self.btn_apply, "Apply the crop to the Pages selection (Ctrl+Enter).", self)
         brot = self._btn(row, "↻  Rotate", self.rotate_pages, height=42)
-        brot.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        brot.grid(row=0, column=1, sticky="ew", padx=4)
         ToolTip(brot, "Rotate the Pages selection 90° CW; cleaning survives rotation.", self)
+        bdel = self._btn(row, "🗑  Delete", self.delete_pages, height=42)
+        bdel.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        ToolTip(bdel, "Delete the Pages selection from the document.", self)
         bex = self._btn(body, "\U0001F4BE   Export PDF", self.save_pdf, primary=True, height=44)
         bex.pack(fill="x")
         ToolTip(bex, "Save the processed document (Ctrl+S).", self)
@@ -640,7 +476,7 @@ class TestUIApp:
                                     border_color=CARD_BORDER)
         self.ov_title = ctk.CTkLabel(self.overlay, text="", font=self.font_title)
         self.ov_title.pack(padx=28, pady=(20, 8))
-        self.ov_bar = ctk.CTkProgressBar(self.overlay, width=260, progress_color=PRIMARY)
+        self.ov_bar = ctk.CTkProgressBar(self.overlay, width=260, progress_color=ACCENT)
         self.ov_bar.set(0)
         self.ov_bar.pack(padx=28)
         self.ov_count = ctk.CTkLabel(self.overlay, text="", font=self.font_mono, text_color=MUTED)
@@ -750,8 +586,10 @@ class TestUIApp:
 
     def load_pdf(self) -> None:
         path = filedialog.askopenfilename(title="Open PDF", filetypes=[("PDF", "*.pdf")])
-        if not path:
-            return
+        if path:
+            self._open_path(path)
+
+    def _open_path(self, path: str) -> None:
         try:
             doc = fitz.open(path)
             if doc.page_count == 0:
@@ -760,11 +598,24 @@ class TestUIApp:
             messagebox.showerror("Load PDF", f"Could not open file:\n{exc}")
             return
         self.doc = doc
+        self._pdf_path = path
+        self.root.title(f"SmartCrop PDF — {os.path.basename(path)}")     # (#14)
         self._pt_size = [(doc[i].rect.width, doc[i].rect.height) for i in range(doc.page_count)]
         self._reset_doc_state()
         mode = self._classify_document()
         self._set_mode(mode)
         self.status_msg(f"Loaded {doc.page_count} pages — classified {mode.capitalize()}.")
+
+    def reset_document(self):
+        """Reset everything to the just-opened state (re-open the book) (#11)."""
+        if self.doc is not None and self._pdf_path:
+            self.history.clear(); self.redo_stack.clear()
+            self._open_path(self._pdf_path)
+        else:                                        # synthetic demo doc
+            self._reset_doc_state()
+            self._set_mode("normal")
+            self._load_synthetic()
+        self.status_msg("Reset to the original document.")
 
     def _reset_doc_state(self) -> None:
         self.current_page = 0
@@ -779,6 +630,8 @@ class TestUIApp:
         self.dewarp_on = False
         self.clean_mode = "none"
         self._out_pages = []
+        self._applied.clear()
+        self._rotation.clear()
         for var in (self.left_off, self.top_off, self.right_off, self.bottom_off):
             var.set(0.0)
 
@@ -844,7 +697,9 @@ class TestUIApp:
         w, h = self._pt_size[idx]
         if self.mode == "scanned":
             k = SRC_DPI / 72.0
-            return w * k, h * k
+            w, h = w * k, h * k
+        if self._rotation.get(idx, 0) % 180 == 90:    # rotation swaps page dimensions
+            return h, w
         return w, h
 
     # ════════════════════════════════════════════════════════════════════
@@ -860,6 +715,9 @@ class TestUIApp:
             img = Image.frombytes("RGB", (pm.width, pm.height), pm.samples)
         else:
             img = self._synthetic_image(idx)
+        ang = self._rotation.get(idx, 0)              # apply page rotation (#8, #13)
+        if ang:
+            img = img.rotate(-ang, expand=True)       # PIL rotates CCW; -ang = clockwise
         self._source_cache[idx] = img
         return img
 
@@ -899,14 +757,27 @@ class TestUIApp:
         proc = self._processed.get(idx, {})
         bgr = cv2.cvtColor(np.array(src), cv2.COLOR_RGB2BGR)
         if proc.get("dewarp"):
-            bgr = deskew(bgr, estimate_skew(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)))
+            bgr = self._dewarp_bgr(bgr)
         clean = proc.get("clean")
         if clean:
             cmode, strength = clean
-            bgr = bilevel_simple(bgr, strength) if cmode == "bw" else sharpen_gray_simple(bgr, strength)
+            if cmode == "bw":
+                g = imaging.clean_document_bilevel(bgr, strength=strength, upscale=1.0)
+            else:
+                g = imaging.sharpen_grayscale(bgr, amount=_CLEAN_AMOUNT[strength])
+            bgr = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
         out = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         self._work_cache[idx] = out
         return out
+
+    def _dewarp_bgr(self, bgr: np.ndarray) -> np.ndarray:
+        """Real learned mesh dewarp when docuwarp is present; otherwise deskew-only."""
+        if imaging.unwarp_available():
+            try:
+                return imaging.unwarp_bgr(bgr)
+            except Exception:
+                pass
+        return imaging.deskew_auto(bgr)[0]
 
     def _gray_for_detect(self, idx: int) -> np.ndarray:
         img = self._work_image(idx) if self.mode == "scanned" else self._source_image(idx)
@@ -917,7 +788,7 @@ class TestUIApp:
     # ════════════════════════════════════════════════════════════════════
     def _resolve_pages(self) -> List[int]:
         try:
-            from smartcrop.parsing import pages_for_mode
+            from parsing import pages_for_mode
             return pages_for_mode(self.pages_mode, self.page_count(), self.current_page,
                                   self.select_var.get())
         except ValueError:
@@ -933,16 +804,28 @@ class TestUIApp:
                                max(b[2] for b in blocks), max(b[3] for b in blocks))
                 return Box(0, 0, w, h)
             return self._synthetic_text_box(idx, w, h)
-        gray = self._gray_for_detect(idx)
-        gh, gw = gray.shape[:2]
-        box = ink_box(gray)
-        if box is None:
+        img = self._work_image(idx) if self.mode == "scanned" else self._source_image(idx)
+        bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        g0h, g0w = bgr.shape[:2]
+        s = min(1.0, DETECT_MAX_PX / max(g0h, g0w))      # downscale for speed (#12)
+        if s < 1.0:
+            bgr = cv2.resize(bgr, (max(1, round(g0w * s)), max(1, round(g0h * s))),
+                             interpolation=cv2.INTER_AREA)
+        gh, gw = bgr.shape[:2]
+        # Real Sauvola clean (flattens photo background) → far better ink mask on real scans
+        # than a global Otsu, which marks a photographed page's tinted paper as ink (#5).
+        bw = imaging.clean_document_bilevel(bgr, strength=2, upscale=1.0)
+        t = imaging.content_box(bw)              # (x0,y0,x1,y1) in (downscaled) raster px
+        if t is None:
             return Box(0, 0, w, h)
-        sx, sy = w / gw, h / gh
-        return Box(box.x0 * sx, box.y0 * sy, box.x1 * sx, box.y1 * sy)
+        sx, sy = w / gw, h / gh                  # map back to page units
+        return Box(t[0] * sx, t[1] * sy, t[2] * sx, t[3] * sy)
 
     def detect_content(self) -> None:
-        if self._busy:
+        if self._busy or self.split_count > 1:
+            return
+        if not (self.auto_left_var.get() or self.auto_top_var.get()):
+            messagebox.showinfo("Auto-detect", "Turn on Anchor Left and/or Anchor Top first.")
             return
         indices = self._resolve_pages()
         if not indices:
@@ -955,27 +838,37 @@ class TestUIApp:
 
     def _finish_detect(self, results: Dict[int, Box]) -> None:
         self._detect_cache.update(results)
-        boxes = list(results.values())
-        if not boxes:
+        if not results:
             messagebox.showwarning("Auto-detect", "No text or ink found.")
             return
-        self._union = Box(min(b.x0 for b in boxes), min(b.y0 for b in boxes),
-                          max(b.x1 for b in boxes), max(b.y1 for b in boxes))
+        # Exclude pages where detection fell back to the full page — one such outlier would
+        # blow W/H up to the sheet size and push right/bottom to the page edge (#2).
+        good = []
+        for i, b in results.items():
+            w, h = self._page_dims(i)
+            if b.width < 0.97 * w or b.height < 0.97 * h:
+                good.append(b)
+        boxes = good or list(results.values())
+        self._union = union_box(boxes)               # constant W=max width, H=max height
         self.auto_active = True
+        self._applied.clear()
         self._sync_ratio_label()
+        self._refresh_detect_enabled()               # highlight Auto-detect (#16)
         self.render_page()
-        self.status_msg(f"Auto-detect: union {self._union.width:.0f}×{self._union.height:.0f}"
-                        f" over {len(boxes)} page(s).")
+        self.status_msg(f"Detected {self._union.width:.0f}×{self._union.height:.0f} px "
+                        f"crop over {len(boxes)} page(s).")
 
     def clear_detect(self) -> None:
         self.auto_active = False
         self._union = None
         self._detect_cache.clear()
+        self._applied.clear()
         self._suspend = True
         for var in (self.left_off, self.top_off, self.right_off, self.bottom_off):
             var.set(0.0)
         self._suspend = False
         self._sync_ratio_label()
+        self._refresh_detect_enabled()               # un-highlight Auto-detect (#16)
         self.render_page()
 
     def _sync_ratio_label(self) -> None:
@@ -992,36 +885,31 @@ class TestUIApp:
             return self._union.width / self._union.height if self._union and self._union.height else None
 
     def _crop_rect(self, idx: int) -> Optional[Box]:
+        # Inactive for split, when undetected, or when both anchors are OFF (spec §7.4).
         if self.split_count > 1 or not self.auto_active or self._union is None:
+            return None
+        if not (self.auto_left_var.get() or self.auto_top_var.get()):
             return None
         w, h = self._page_dims(idx)
         b = self._detect_cache.get(idx) or Box(0, 0, w, h)
-        u = self._union
-        left_base = b.x0 if self.auto_left_var.get() else u.x0
-        top_base = b.y0 if self.auto_top_var.get() else u.y0
-        left = left_base - self.left_off.get() / 100.0 * w
-        top = top_base - self.top_off.get() / 100.0 * h
-        right = left + u.width + self.right_off.get() / 100.0 * w
-        bottom = top + u.height + self.bottom_off.get() / 100.0 * h
-        return clamp_box(Box(left, top, right, bottom), w, h)
+        rect = auto_crop_rect(b, self._union, self.auto_left_var.get(), self.auto_top_var.get(),
+                              self.left_off.get(), self.top_off.get(),
+                              self.right_off.get(), self.bottom_off.get(), w, h)
+        if self.keep_ratio_var.get():                # lock height = width / ratio (#14)
+            ratio = self._active_ratio()
+            if ratio:
+                rect = clamp_box(Box(rect.x0, rect.y0, rect.x1, rect.y0 + rect.width / ratio), w, h)
+        return rect
 
     def _on_offset_change(self):
         if not self._suspend:
             self.render_page()
 
     def _on_right_change(self):
-        if self._suspend:
-            return
-        ratio = self._active_ratio()
-        if self.keep_ratio_var.get() and ratio and self._union:
-            w, h = self._page_dims(self.current_page)
-            target_h = (self._union.width + self.right_off.get() / 100.0 * w) / ratio
-            self._suspend = True
-            self.bottom_off.set(round((target_h - self._union.height) / h * 100.0, 1))
-            self._suspend = False
-        self.render_page()
+        self.render_page()                           # ratio (if on) is enforced in _crop_rect
 
     def _on_anchor(self):
+        self._refresh_detect_enabled()               # both anchors OFF ⇒ detect inactive (#4)
         self.render_page()
 
     def _on_ratio_toggle(self):
@@ -1045,15 +933,24 @@ class TestUIApp:
             return
         self.canvas.configure(bg=self._theme()["CANVAS_BG"])
         w, h = self._page_dims(self.current_page)
+        work = self._work_image(self.current_page)
+        applied = self._applied.get(self.current_page)
+        if applied:                                  # show committed crop (first box), not full page (#13)
+            box = applied[0]
+            ix, iy = work.width / w, work.height / h
+            work = work.crop((round(box.x0 * ix), round(box.y0 * iy),
+                              round(box.x1 * ix), round(box.y1 * iy)))
+            w, h = box.width, box.height
         self.scale = min((cw - CANVAS_MARGIN) / w, (ch - CANVAS_MARGIN) / h)
-        disp = self._work_image(self.current_page).resize(
-            (max(1, round(w * self.scale)), max(1, round(h * self.scale))), Image.LANCZOS)
+        disp = work.resize((max(1, round(w * self.scale)), max(1, round(h * self.scale))),
+                           Image.LANCZOS)
         self.tk_image = ImageTk.PhotoImage(disp)
         self.img_x = max(0, (cw - disp.width) // 2)
         self.img_y = max(0, (ch - disp.height) // 2)
         self.canvas.delete("all")
         self.canvas.create_image(self.img_x, self.img_y, anchor="nw", image=self.tk_image)
-        self._draw_overlay()
+        if not applied:                              # no handles/overlay over a committed crop
+            self._draw_overlay()
         self.page_var.set(str(self.current_page + 1))
         self.page_total.configure(text=f"/ {self.page_count()}")
         if not self._busy:
@@ -1062,24 +959,29 @@ class TestUIApp:
 
     def _draw_overlay(self) -> None:
         t = self._theme()
-        colors = [t["CANVAS_ACCENT"], "#5dcff0", "#f0b35d", "#9b8cff"]
+        split = self.split_count > 1
+        if self._draw_rect is not None:               # rubber-band for a new crop area (B#2)
+            dx0, dy0 = self._pdf_to_canvas(self._draw_rect.x0, self._draw_rect.y0)
+            dx1, dy1 = self._pdf_to_canvas(self._draw_rect.x1, self._draw_rect.y1)
+            self.canvas.create_rectangle(dx0, dy0, dx1, dy1, outline=CROP_BLUE, width=2, dash=(4, 3))
+            return
         for i, box in enumerate(self._preview_boxes()):
             if box is None:
                 continue
-            color = colors[min(i, len(colors) - 1)]
+            color = SPLIT_BLUE if split else CROP_BLUE
+            width = 4 if split else 3                  # split lines 30% thicker, absolute (#12)
             x0, y0 = self._pdf_to_canvas(box.x0, box.y0)
             x1, y1 = self._pdf_to_canvas(box.x1, box.y1)
-            self.canvas.create_rectangle(x0, y0, x1, y1, outline=color, width=3, dash=(6, 4))
+            self.canvas.create_rectangle(x0, y0, x1, y1, outline=color, width=width, dash=(6, 4))
             for hx, hy in self._handle_positions(box).values():
                 self.canvas.create_polygon(hx, hy - HANDLE_R, hx + HANDLE_R, hy, hx, hy + HANDLE_R,
                                            hx - HANDLE_R, hy, fill=t["HANDLE_FILL"],
                                            outline=t["HANDLE"], width=2)
-            if self.split_count > 1:
-                self.canvas.create_oval(x0 + 5, y0 + 5, x0 + 30, y0 + 30, fill=color, outline="")
-                self.canvas.create_text(x0 + 17, y0 + 17, text="①②③④"[i], fill="white",
-                                        font=("Segoe UI", 14, "bold"))
+            if split:                                 # big number, no circle, dark blue (#12)
+                self.canvas.create_text(x0 + 20, y0 + 20, text="①②③④"[i], fill=SPLIT_BLUE,
+                                        font=("Segoe UI", 28, "bold"), anchor="nw")
             elif self.auto_active:
-                self.canvas.create_text(x0 + 13, y0 + 13, text="✦", fill=t["MAGIC"],
+                self.canvas.create_text(x0 + 13, y0 + 13, text="✦", fill=CROP_BLUE,
                                         font=("Segoe UI", 16, "bold"), anchor="nw")
 
     def _preview_boxes(self) -> List[Optional[Box]]:
@@ -1095,15 +997,15 @@ class TestUIApp:
                 "SE": (x1, y1), "S": (mx, y1), "SW": (x0, y1), "W": (x0, my)}
 
     def _hit_handle(self, box, ex, ey):
-        r = HANDLE_R + HANDLE_SLACK
-        for name, (hx, hy) in self._handle_positions(box).items():
-            if abs(ex - hx) <= r and abs(ey - hy) <= r:
-                return name
-        return None
+        px, py = self._canvas_to_pdf(ex, ey)             # hit-test in page coords (shared logic)
+        tol = (HANDLE_R + HANDLE_SLACK) / max(self.scale, 1e-6)
+        return hit_handle(box, px, py, tol)
 
     def _on_press(self, event):
         if self.page_count() == 0 or self._busy:
             return
+        if self._applied.pop(self.current_page, None) is not None:   # editing resumes full page
+            self.render_page()
         if self.split_count > 1:
             self._press_split(event)
         else:
@@ -1111,19 +1013,24 @@ class TestUIApp:
 
     def _press_auto(self, event):
         box = self._crop_rect(self.current_page)
-        if box is None:
-            return
-        handle = self._hit_handle(box, event.x, event.y)
-        if handle is None:
-            return
+        px, py = self._canvas_to_pdf(event.x, event.y)
+        handle = self._hit_handle(box, event.x, event.y) if box is not None else None
         w, h = self._page_dims(self.current_page)
         b = self._detect_cache.get(self.current_page) or Box(0, 0, w, h)
         u = self._union or Box(0, 0, w, h)
-        px, py = self._canvas_to_pdf(event.x, event.y)
-        self._drag = dict(kind="auto", handle=handle, start=(px, py), rect0=box,
-                          left_base=b.x0 if self.auto_left_var.get() else u.x0,
-                          top_base=b.y0 if self.auto_top_var.get() else u.y0, w=w, h=h)
-        self.canvas.configure(cursor=HANDLE_CURSOR[handle])
+        base = dict(rect0=box, start=(px, py), w=w, h=h,
+                    left_base=b.x0 if self.auto_left_var.get() else u.x0,
+                    top_base=b.y0 if self.auto_top_var.get() else u.y0)
+        if handle is not None:                       # resize one edge
+            self._drag = dict(kind="auto", handle=handle, **base)
+            self.canvas.configure(cursor=HANDLE_CURSOR[handle])
+        elif box is not None and point_in_box(box, px, py):   # move the whole crop (#10)
+            self._drag = dict(kind="auto-move", **base)
+            self.canvas.configure(cursor="fleur")
+        else:                                        # empty area → draw a fresh crop (B#2)
+            self._drag = dict(kind="draw", start=(px, py))
+            self._draw_rect = None
+            self.canvas.configure(cursor="crosshair")
 
     def _press_split(self, event):
         px, py = self._canvas_to_pdf(event.x, event.y)
@@ -1145,23 +1052,27 @@ class TestUIApp:
         dx, dy = px - self._drag["start"][0], py - self._drag["start"][1]
         k = self._drag["kind"]
         if k == "auto":
-            self._drag_auto(dx, dy)
+            d = self._drag
+            self._write_auto_offsets(resize_by_handle(d["rect0"], d["handle"], dx, dy, d["w"], d["h"]))
+        elif k == "auto-move":                       # translate the whole auto crop (#10)
+            d = self._drag
+            self._write_auto_offsets(move_box(d["rect0"], dx, dy, d["w"], d["h"]))
         elif k == "split-edge":
             self._drag_split_edge(dx, dy)
-        else:
+        elif k == "split-move":
             self._drag_split_move(dx, dy)
+        else:                                        # "draw" — live rubber-band rectangle
+            w, h = self._page_dims(self.current_page)
+            sx, sy = self._drag["start"]
+            self._draw_rect = clamp_box(Box(min(sx, px), min(sy, py),
+                                            max(sx, px), max(sy, py)), w, h)
         self.render_page()
         self._update_status(event)
 
-    def _drag_auto(self, dx, dy):
+    def _write_auto_offsets(self, new: Box):
+        """Write the four offsets so _crop_rect reproduces `new` exactly (drag/move)."""
         d = self._drag
-        r0, w, h = d["rect0"], d["w"], d["h"]
-        c = dict(x0=r0.x0, y0=r0.y0, x1=r0.x1, y1=r0.y1)
-        for e in HANDLE_EDGES[d["handle"]]:
-            c[e] += dx if e in ("x0", "x1") else dy
-        new = clamp_box(Box(min(c["x0"], c["x1"] - MIN_RECT), min(c["y0"], c["y1"] - MIN_RECT),
-                            max(c["x1"], c["x0"] + MIN_RECT), max(c["y1"], c["y0"] + MIN_RECT)), w, h)
-        u = self._union
+        w, h, u = d["w"], d["h"], self._union
         self._suspend = True
         self.left_off.set(round((d["left_base"] - new.x0) / w * 100.0, 1))
         self.top_off.set(round((d["top_base"] - new.y0) / h * 100.0, 1))
@@ -1171,23 +1082,13 @@ class TestUIApp:
 
     def _drag_split_edge(self, dx, dy):
         d = self._drag
-        r0, i = d["rect0"], d["idx"]
         w, h = self._page_dims(self.current_page)
-        c = dict(x0=r0.x0, y0=r0.y0, x1=r0.x1, y1=r0.y1)
-        for e in HANDLE_EDGES[d["handle"]]:
-            c[e] += dx if e in ("x0", "x1") else dy
-        self.crop_rects[i] = clamp_box(Box(min(c["x0"], c["x1"] - MIN_RECT),
-                                           min(c["y0"], c["y1"] - MIN_RECT),
-                                           max(c["x1"], c["x0"] + MIN_RECT),
-                                           max(c["y1"], c["y0"] + MIN_RECT)), w, h)
+        self.crop_rects[d["idx"]] = resize_by_handle(d["rect0"], d["handle"], dx, dy, w, h)
 
     def _drag_split_move(self, dx, dy):
         d = self._drag
-        r0, i = d["rect0"], d["idx"]
         w, h = self._page_dims(self.current_page)
-        nx0 = min(max(0.0, r0.x0 + dx), w - r0.width)
-        ny0 = min(max(0.0, r0.y0 + dy), h - r0.height)
-        self.crop_rects[i] = Box(nx0, ny0, nx0 + r0.width, ny0 + r0.height)
+        self.crop_rects[d["idx"]] = move_box(d["rect0"], dx, dy, w, h)
 
     def _on_release(self, _e):
         d = self._drag
@@ -1203,8 +1104,33 @@ class TestUIApp:
             if self.same_size_var.get():
                 self._apply_same_size(i)
             self.render_page()
+        elif d and d["kind"] == "draw":
+            self._commit_drawn_rect()
         self._drag = None
         self.canvas.configure(cursor="crosshair")
+
+    def _commit_drawn_rect(self):
+        """Adopt the rubber-band rectangle as the crop (replacing any previous one)."""
+        r = self._draw_rect
+        self._draw_rect = None
+        if r is None or r.width < 2 * MIN_RECT or r.height < 2 * MIN_RECT:
+            self.render_page()
+            return
+        if not (self.auto_left_var.get() or self.auto_top_var.get()):
+            self.auto_left_var.set(True)             # need an anchor for the crop to show (#4)
+        idx = self.current_page
+        self._detect_cache[idx] = r                  # this page's content edge = drawn corner
+        self._union = Box(r.x0, r.y0, r.x1, r.y1)    # constant W/H = drawn size
+        self.auto_active = True
+        self._applied.pop(idx, None)
+        self._suspend = True
+        for var in (self.left_off, self.top_off, self.right_off, self.bottom_off):
+            var.set(0.0)
+        self._suspend = False
+        self._sync_ratio_label()
+        self._refresh_detect_enabled()
+        self.render_page()
+        self.status_msg("New crop area set — drag handles to fine-tune.")
 
     def _apply_same_size(self, src: int):
         """Resize every split rectangle to match box `src`, anchored at its own corner."""
@@ -1284,13 +1210,23 @@ class TestUIApp:
             self.btn_apply.configure(state="normal" if ok and not self._busy else "disabled")
 
     def _set_detect_enabled(self, enabled: bool):
+        """Anchors/ratio/offsets follow split (enabled only at split=1)."""
         state = "normal" if enabled else "disabled"
-        self.btn_detect.configure(state=state)
         for sw in (self.sw_left, self.sw_top, self.sw_ratio):
             sw.configure(state=state)
         self.ratio_entry.configure(state=state)
         for sp in self._off_spins:
             sp.configure_state(state)
+        self._refresh_detect_enabled()
+
+    def _refresh_detect_enabled(self):
+        """Auto-detect is active only at split=1 with at least one anchor ON (spec §7.4).
+        It is highlighted only while a detection is live (not after Clear / a new draw, #16)."""
+        one_anchor = self.auto_left_var.get() or self.auto_top_var.get()
+        ok = self.split_count == 1 and one_anchor and not self._busy
+        if hasattr(self, "btn_detect"):
+            self.btn_detect.configure(state="normal" if ok else "disabled")
+            self._set_active(self.btn_detect, self.auto_active and self.split_count == 1)
 
     # ════════════════════════════════════════════════════════════════════
     #  SCAN PROCESSING
@@ -1308,6 +1244,11 @@ class TestUIApp:
         for i in indices:
             self._processed.setdefault(i, {})["dewarp"] = self.dewarp_on
         self._work_cache.clear()
+        if self.dewarp_on and imaging.unwarp_available():     # warm the model on the main thread
+            try:                                              # so the 1st batch run isn't skipped (#8)
+                imaging.unwarp_bgr(np.full((32, 32, 3), 255, np.uint8))
+            except Exception:
+                pass
         self._threaded_map(indices, self._work_image, lambda _r: self.render_page(),
                            "Dewarp & Deskew")
 
@@ -1324,12 +1265,9 @@ class TestUIApp:
             self._run_clean()
 
     def _refresh_scan_buttons(self):
-        def style(btn, on):
-            btn.configure(fg_color=PRIMARY if on else SECONDARY,
-                          text_color=PRIMARY_TEXT if on else SECONDARY_TEXT)
-        style(self.btn_dewarp, self.dewarp_on)
-        style(self.btn_bw, self.clean_mode == "bw")
-        style(self.btn_gray, self.clean_mode == "gray")
+        self._set_active(self.btn_dewarp, self.dewarp_on)
+        self._set_active(self.btn_bw, self.clean_mode == "bw")
+        self._set_active(self.btn_gray, self.clean_mode == "gray")
 
     def _run_clean(self):
         self._snapshot_history()
@@ -1344,7 +1282,7 @@ class TestUIApp:
         self._threaded_map(indices, self._work_image, lambda _r: self.render_page(), "Cleaning pages")
 
     def _threaded_map(self, indices, work_fn, on_done, title):
-        if self.mode != "scanned" or len(indices) <= 1:
+        if len(indices) <= 1:                        # multi-page ⇒ show progress (#12, #17)
             on_done({i: work_fn(i) for i in indices})
             return
         self._busy = True
@@ -1436,6 +1374,13 @@ class TestUIApp:
     # ════════════════════════════════════════════════════════════════════
     #  APPLY / EXPORT / ROTATE
     # ════════════════════════════════════════════════════════════════════
+    def _page_crop_boxes(self, i: int) -> List[Box]:
+        """Crop box(es) for page i in page coords (split → N rects, auto → the crop rect)."""
+        w, h = self._page_dims(i)
+        if self.split_count > 1:
+            return list(self.crop_rects)
+        return [self._crop_rect(i) or Box(0, 0, w, h)]
+
     def apply_crop(self):
         if self._busy or self.page_count() == 0:
             return
@@ -1447,56 +1392,64 @@ class TestUIApp:
             messagebox.showwarning("Apply Crop", "Empty Pages selection.")
             return
         self._snapshot_history()
-        try:
-            self._out_pages = self._build_output_pages(indices)
-        except Exception as exc:
-            messagebox.showerror("Apply Crop", str(exc))
-            return
-        self.status_msg(f"Applied crop → {len(self._out_pages)} output page(s). Export to save.")
-        messagebox.showinfo("Apply Crop", f"Crop computed for {len(indices)} page(s) → "
-                            f"{len(self._out_pages)} output page(s).\nUse Export PDF to save.")
+        for i in indices:                            # commit the crop state per page (#7, #13, #18)
+            self._applied[i] = self._page_crop_boxes(i)
+        self.render_page()
+        self.status_msg(f"✓ Cropped {len(indices)} page(s). Export PDF to save.")
 
-    def _build_output_pages(self, indices):
+    def _output_images(self, i: int) -> List[Image.Image]:
+        """Render page i to its committed output image(s); uncommitted pages export whole."""
+        img = self._work_image(i)
+        w, h = self._page_dims(i)
+        sx, sy = img.width / w, img.height / h
+        boxes = self._applied.get(i) or [Box(0, 0, w, h)]
         out = []
-        for i in indices:
-            img = self._work_image(i)
-            w, h = self._page_dims(i)
-            sx, sy = img.width / w, img.height / h
-            boxes = self.crop_rects if self.split_count > 1 else [self._crop_rect(i) or Box(0, 0, w, h)]
-            for box in boxes:
-                crop = img.crop((round(box.x0 * sx), round(box.y0 * sy),
-                                 round(box.x1 * sx), round(box.y1 * sy)))
-                tw, th = self._target_size(box.width, box.height)
-                if (round(tw), round(th)) != (crop.width, crop.height):
-                    crop = crop.resize((max(1, round(tw)), max(1, round(th))), Image.LANCZOS)
-                out.append(crop)
+        for box in boxes:
+            crop = img.crop((round(box.x0 * sx), round(box.y0 * sy),
+                             round(box.x1 * sx), round(box.y1 * sy)))
+            tw, th = self._target_size(box.width, box.height)
+            if (round(tw), round(th)) != (crop.width, crop.height):
+                crop = crop.resize((max(1, round(tw)), max(1, round(th))), Image.LANCZOS)
+            out.append(crop)
         return out
 
     def save_pdf(self):
         if self._busy or self.page_count() == 0:
             return
-        if not self._out_pages:
+        if not self._applied:                        # nothing committed yet → commit selection now
             indices = self._resolve_pages()
             if not indices:
                 messagebox.showwarning("Export PDF", "Empty Pages selection.")
                 return
-            try:
-                self._out_pages = self._build_output_pages(indices)
-            except Exception as exc:
-                messagebox.showerror("Export PDF", str(exc))
-                return
+            for i in indices:
+                self._applied[i] = self._page_crop_boxes(i)
+        suggested = "output_cropped.pdf"            # suggest <orig>_cropped.pdf (#10)
+        if self._pdf_path:
+            suggested = os.path.splitext(os.path.basename(self._pdf_path))[0] + "_cropped.pdf"
         path = filedialog.asksaveasfilename(title="Export PDF", defaultextension=".pdf",
-                                            filetypes=[("PDF", "*.pdf")])
+                                            initialfile=suggested, filetypes=[("PDF", "*.pdf")])
         if not path:
             return
-        out_doc = fitz.open()
-        for img in self._out_pages:
-            page = out_doc.new_page(width=img.width, height=img.height)
-            page.insert_image(page.rect, stream=_pil_to_bytes(img))
-        out_doc.save(path, garbage=4, deflate=True)
-        out_doc.close()
-        self.status_msg(f"Exported {len(self._out_pages)} page(s).")
-        messagebox.showinfo("Export PDF", f"Saved {len(self._out_pages)} page(s) to:\n{path}")
+        pages = list(range(self.page_count()))       # every page (committed = cropped, else whole)
+        self._threaded_map(pages, self._output_images,
+                           lambda res: self._write_pdf(path, pages, res), "Exporting pages")
+
+    def _write_pdf(self, path, pages, results):
+        try:
+            out_doc = fitz.open()
+            n = 0
+            for i in pages:
+                for img in results.get(i, []):
+                    pg = out_doc.new_page(width=img.width, height=img.height)
+                    pg.insert_image(pg.rect, stream=_pil_to_bytes(img))
+                    n += 1
+            out_doc.save(path, garbage=4, deflate=True)
+            out_doc.close()
+        except Exception as exc:
+            messagebox.showerror("Export PDF", str(exc))
+            return
+        self.status_msg(f"✓ Exported {n} page(s).")
+        messagebox.showinfo("Export PDF", f"Saved {n} page(s) to:\n{path}")
 
     def rotate_pages(self):
         if self._busy or self.page_count() == 0:
@@ -1506,16 +1459,13 @@ class TestUIApp:
             messagebox.showwarning("Rotate", "Empty Pages selection.")
             return
         self._snapshot_history()
-        for i in indices:
-            self._pt_size[i] = (self._pt_size[i][1], self._pt_size[i][0])
-            if i in self._source_cache:
-                self._source_cache[i] = self._source_cache[i].rotate(-90, expand=True)
-            w = self._work_cache.pop(i, None)
-            if w is not None:
-                self._work_cache[i] = w.rotate(-90, expand=True)
-        self._detect_cache.clear()
+        for i in indices:                            # angle-map rotate: undoable, works in scan mode
+            self._rotation[i] = (self._rotation.get(i, 0) + 90) % 360
+            for d in (self._source_cache, self._work_cache, self._detect_cache, self._applied):
+                d.pop(i, None)                       # re-render at new angle; drop any committed crop
         self._union = None
         self.auto_active = False
+        self._refresh_detect_enabled()
         self.render_page()
         self.status_msg(f"Rotated {len(indices)} page(s) 90° CW.")
 
@@ -1523,27 +1473,30 @@ class TestUIApp:
     #  HISTORY
     # ════════════════════════════════════════════════════════════════════
     def _capture(self):
-        return dict(pt_size=list(self._pt_size),
-                    processed={k: dict(v) for k, v in self._processed.items()},
+        return dict(processed={k: dict(v) for k, v in self._processed.items()},
                     detect=dict(self._detect_cache), union=self._union, auto=self.auto_active,
-                    rects=list(self.crop_rects),
+                    rects=list(self.crop_rects), rotation=dict(self._rotation),
+                    applied={k: list(v) for k, v in self._applied.items()},
                     off=(self.left_off.get(), self.top_off.get(), self.right_off.get(),
                          self.bottom_off.get()),
                     dewarp=self.dewarp_on, clean=self.clean_mode, strength=self.clean_strength)
 
     def _restore(self, st):
-        self._pt_size = list(st["pt_size"])
         self._processed = {k: dict(v) for k, v in st["processed"].items()}
         self._detect_cache = dict(st["detect"])
         self._union, self.auto_active = st["union"], st["auto"]
         self.crop_rects = list(st["rects"])
+        self._rotation = dict(st["rotation"])
+        self._applied = {k: list(v) for k, v in st["applied"].items()}
         self._suspend = True
         self.left_off.set(st["off"][0]); self.top_off.set(st["off"][1])
         self.right_off.set(st["off"][2]); self.bottom_off.set(st["off"][3])
         self._suspend = False
         self.dewarp_on, self.clean_mode, self.clean_strength = st["dewarp"], st["clean"], st["strength"]
+        self._source_cache.clear()                   # rotation changed → re-render rasters
         self._work_cache.clear()
         self._refresh_scan_buttons()
+        self._refresh_detect_enabled()
         self.strength_seg.set(str(self.clean_strength))
         self._sync_ratio_label()
         self.render_page()
@@ -1572,10 +1525,42 @@ class TestUIApp:
 
     def reset_page(self):
         idx = self.current_page
-        for d in (self._source_cache, self._work_cache, self._detect_cache, self._processed):
+        self._snapshot_history()
+        for d in (self._source_cache, self._work_cache, self._detect_cache, self._processed,
+                  self._applied, self._rotation):    # full per-page reset incl. scan processing (#15)
             d.pop(idx, None)
         self.render_page()
-        self.status_msg(f"Reset page {idx + 1} to source.")
+        self.status_msg(f"Reset page {idx + 1} to original.")
+
+    def delete_pages(self):
+        """Delete the Pages selection from the document (#10)."""
+        if self._busy or self.page_count() == 0:
+            return
+        if self.doc is None:
+            messagebox.showinfo("Delete", "Open a PDF first (the demo document can't be edited).")
+            return
+        idxs = sorted(set(self._resolve_pages()))
+        if not idxs:
+            messagebox.showwarning("Delete", "Empty Pages selection.")
+            return
+        if len(idxs) >= self.page_count():
+            messagebox.showwarning("Delete", "Can't delete every page.")
+            return
+        if not messagebox.askyesno("Delete", f"Delete {len(idxs)} page(s) from the document?"):
+            return
+        self.doc.delete_pages(idxs)                   # fitz reindexes the remaining pages
+        self._pt_size = [(self.doc[i].rect.width, self.doc[i].rect.height)
+                         for i in range(self.doc.page_count)]
+        for d in (self._source_cache, self._work_cache, self._detect_cache, self._processed,
+                  self._applied, self._rotation):     # indices shifted → caches invalid
+            d.clear()
+        self._union = None
+        self.auto_active = False
+        self.history.clear(); self.redo_stack.clear()
+        self.current_page = min(self.current_page, self.page_count() - 1)
+        self._refresh_detect_enabled()
+        self.render_page()
+        self.status_msg(f"Deleted {len(idxs)} page(s). {self.page_count()} remain.")
 
     # ════════════════════════════════════════════════════════════════════
     #  NAV
@@ -1639,14 +1624,14 @@ class TestUIApp:
         def menu(label, var, values, cmd):
             ctk.CTkOptionMenu(row(label), variable=var, values=values, font=self.font_base,
                               fg_color=SECONDARY, button_color=SECONDARY_HOVER,
-                              button_hover_color=PRIMARY, text_color=SECONDARY_TEXT,
+                              button_hover_color=ACCENT, text_color=SECONDARY_TEXT,
                               width=110, command=cmd).pack(side="right", padx=14)
 
         group("Appearance")
         r = row("Colour scheme")
         seg = ctk.CTkSegmentedButton(r, values=["☀ Light", "🌙 Dark", "🖥 System"],
-                                     font=self.font_base, selected_color=PRIMARY,
-                                     selected_hover_color=PRIMARY_HOVER, command=self._set_theme)
+                                     font=self.font_base, selected_color=ACCENT, selected_hover_color=ACCENT_HOVER, fg_color=SEG_UNSEL,
+                                     text_color=ACCENT_TEXT, command=self._set_theme)
         seg.set({"Light": "☀ Light", "Dark": "🌙 Dark", "System": "🖥 System"}[self.theme_choice.get()])
         seg.pack(side="right", padx=14)
         menu("Font size", self.font_size_var,
@@ -1658,14 +1643,14 @@ class TestUIApp:
         r = row("Default resolution")
         ctk.CTkOptionMenu(r, variable=self.resize_var, values=list(RESOLUTIONS), font=self.font_base,
                           fg_color=SECONDARY, button_color=SECONDARY_HOVER,
-                          button_hover_color=PRIMARY, text_color=SECONDARY_TEXT,
+                          button_hover_color=ACCENT, text_color=SECONDARY_TEXT,
                           command=lambda _v: self._sync_resize_ui()).pack(side="right", padx=14)
 
         group("Behaviour")
         ctk.CTkSwitch(row("Confirm before overwrite"), text="", variable=self.confirm_overwrite,
-                      progress_color=PRIMARY).pack(side="right", padx=14)
+                      progress_color=ACCENT).pack(side="right", padx=14)
         ctk.CTkSwitch(row("Remember last folder"), text="", variable=self.remember_folder,
-                      progress_color=PRIMARY).pack(side="right", padx=14)
+                      progress_color=ACCENT).pack(side="right", padx=14)
         ctk.CTkEntry(row("Undo / redo depth"), textvariable=self.undo_depth_var, width=90,
                      font=self.font_base).pack(side="right", padx=14)
 
@@ -1674,10 +1659,9 @@ class TestUIApp:
                            ("Worker threads", self.workers_var)]:
             ctk.CTkEntry(row(label), textvariable=var, width=90, font=self.font_base).pack(
                 side="right", padx=14)
-        win.update_idletasks()
-        win.geometry("")                               # shrink-wrap to content (no blank space)
-        win.update_idletasks()
-        win.geometry(f"620x{win.winfo_height()}")      # standardise width, keep fitted height
+        win.update_idletasks()                         # size to content (CTk rejects geometry(""))
+        h = body.winfo_y() + body.winfo_reqheight() + 18
+        win.geometry(f"620x{h}")
 
     def _set_theme(self, value: str):
         name = {"☀ Light": "Light", "🌙 Dark": "Dark", "🖥 System": "System"}[value]
@@ -1735,10 +1719,15 @@ def main() -> None:
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("blue")
     root = ctk.CTk()
+
+    def report_exception(exc, val, tb):              # never crash on a callback (#5)
+        import traceback
+        traceback.print_exception(exc, val, tb)
+        try:
+            messagebox.showerror("SmartCrop PDF", f"{exc.__name__}: {val}")
+        except Exception:
+            pass
+    root.report_callback_exception = report_exception
+
     TestUIApp(root)
     root.mainloop()
-
-
-if __name__ == "__main__":
-    main()
-

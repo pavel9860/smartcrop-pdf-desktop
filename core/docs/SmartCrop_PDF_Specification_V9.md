@@ -64,25 +64,31 @@ Pure, Tk-free core separated from UI for testability. Tkinter and all PyMuPDF do
 mutation run **only on the main thread**; CPU-heavy imaging runs in worker threads on
 prerendered numpy rasters.
 
+Flat layout in the repo root — pure, Tk-free logic modules sit next to the UI modules, with
+`main.py` as the **single** entry point. Pure logic is unit-tested; the UI is integration-
+tested via a headless `TestUIApp`.
+
 ```
-pdf_cropper.py                entry point (creates root + app, runs mainloop)
-smartcrop/
-  __init__.py                 lazy export of the app class
-  constants.py                ALL tunables, fonts, sizes, theme maps, strings
-  imaging.py                  cv2/skimage primitives (pure ndarray→ndarray)
-  core/
-    pages.py                  page-selection parsing
-    detect.py                 per-page content-box detection
-    geometry.py               crop-rect ↔ per-edge offsets, drag back-out
-    pipeline.py               scan intent → processed raster; raster cache (LRU)
-    document.py               PDF I/O, crop/apply/export, rotate, history
-  ui/
-    widgets.py                Tooltip, ToggleSwitch, Segmented, ProgressOverlay
-    panels.py                 section builders
-    app.py                    orchestration & event wiring only
+main.py            entry point — the ONLY starter (python main.py)
+app.py             TestUIApp: orchestration, panels, event wiring, main()
+widgets.py         ToolTip, Spin
+theme.py           colour palette (warm-gray chrome + blue accent)
+help_content.py    help sections + tooltip text
+geometry.py        Box, crop-rect math, drag/resize/move, union_box + auto_crop_rect   ┐ pure,
+imaging.py         cv2/numpy primitives (Sauvola clean, deskew, content_box, dewarp)    │ Tk-free
+parsing.py         page-selection parsing (all/odd/even/ranges/slices)                  │
+constants.py       resolutions + dark/light canvas theme tokens                         ┘
+tests/             unit + integration (see Test Specification)
+core/              previous versions (legacy ttk) + docs/
+old/               this version's scratch (logs, algorithms_test)
+.gitignore  pyproject.toml  requirements.txt  README.md
 ```
 
-Dependency rule: `ui/*` → `core/*` → `imaging.py` → `constants.py`. No upward imports.
+Dependency rule: `main.py / app.py / *ui modules` → `geometry / imaging / parsing /
+constants`. No upward imports. Tkinter and PyMuPDF document mutation run **only on the main
+thread**; CPU-heavy imaging runs in worker threads on prerendered numpy rasters. Run with
+`python main.py`. Unhandled Tk-callback exceptions are caught by a global handler and shown
+in a dialog rather than crashing.
 
 ---
 
@@ -124,10 +130,11 @@ geometry/drag/render code path serves both modes.
 
 ## 6. Window layout (console art)
 
-Two panes split by a draggable sash. Left = scrollable control stack with a **bottom bar
-pinned** to the panel (packed before the scroll region, so it never floats and stays
-visible on short windows). Right = page canvas with a **centered inline progress overlay**
-and a bottom-right status strip. Scanned-only sections pack/unpack with no residual gap.
+Two panes split by a draggable sash. Left = a single **scrollable control stack** ending
+with the Settings/Help + page-nav card (it scrolls with everything else — nothing is pinned;
+the panel keeps a fixed width via `pack_propagate(False)`). Right = page canvas with a
+**centered inline progress overlay** and a bottom-right status strip. Scanned-only sections
+pack/unpack with no residual gap.
 
 ```
 ┌──────────────────────────────────┬───────────────────────────────────────────────┐
@@ -163,7 +170,7 @@ and a bottom-right status strip. Scanned-only sections pack/unpack with no resid
 │ [   ✂ Apply Crop   ][  ↻ Rotate ]│                                              │
 │ [          💾 Export PDF        ] │                                              │
 │ ··············(scroll)···········│                                               │
-│ ┌ bottom bar (pinned) ────────────│                               x 34.2% y 12.7%│  status strip
+│ ┌ Settings/Help + nav (scrolls) ──│                               x 34.2% y 12.7%│  status strip
 │ │ [ ⚙ Settings ][ ? Help ]       │                           ⬓ 41.0 × 58.3 %    │
 │ │ [ ◀ ]  [ 3 ] / 312   [ ▶ ]        │                               page 3 / 312   │
 │ └────────────────────────────────┴───────────────────────────────────────────────┘
@@ -173,12 +180,13 @@ and a bottom-right status strip. Scanned-only sections pack/unpack with no resid
 
 ## 7. Control reference
 
-Every control carries a hover tooltip. Sections top→bottom; the bottom bar is pinned.
+Every control carries a hover tooltip. Sections top→bottom; Settings/Help + nav is the last
+card and scrolls with the column.
 
 ### 7.1 Document & State
 | Control | Action | Behavior |
 |---|---|---|
-| Mode badge (title line) | toggle mode | Normal/Scanned; click flips, resets detection + raster cache, repaints |
+| Mode marker (title line) | — | Normal/Scanned pill. A **non-interactive marker** (same size/colour as a button, but not clickable); set automatically by classification on load |
 | `Load PDF` (panel width) | open file | classify → set mode → init caches → clear history |
 | `↩ Undo` `Redo ↪` `⟲ Reset` (equal width, always visible) | undo / redo / reset page | Undo/redo depth = `HISTORY_DEPTH`, covers dewarp/clean/crop/rotate; Reset reloads the current page from the pre-process cache |
 
@@ -207,15 +215,18 @@ quadrants).
 ### 7.4 Detect
 | Control | Action | Behavior |
 |---|---|---|
-| `✦ Auto-detect` | detect | per-page content box (§8); scanned mode shows the progress overlay |
-| `Anchor Left` / `Anchor Top` (toggles) | re-render | left/top edge from detected text (ON) or page boundary (OFF) |
+| `✦ Auto-detect` | detect | per-page content box (§8); scanned mode shows the progress overlay. **Disabled** when Split > 1 or both anchors are OFF |
+| `Anchor Left` / `Anchor Top` (toggles) | re-render | left/top edge from detected text (ON) or union edge (OFF); toggling re-evaluates whether Auto-detect is active |
 | `Keep ratio` (toggle) | — | editing R also sets B to hold the current page's detected aspect |
-| `L T R B` spinboxes (font the same size like other elements; range ±100, step 0.1) | re-render | per-edge percent offsets |
+| `L T R B` (label inline with the field; default font; range ±100, step 0.1) | re-render | per-edge percent offsets; each moves exactly one edge |
 | `✕ Clear` | clear | drop detection + offsets |
 
-### 7.5 Pages — §11.  ### 7.6 Resize — `Original (No Resize)`, device/monitor presets, `Custom…` (W×H); applied last.
-### 7.7 Actions — `✂ Apply Crop`, `↻ Rotate` (rotates pages, preserves cleaning).
-### 7.8 Bottom bar — `⚙ Settings`, `? Help`, page nav `◀ n/total ▶`.
+### 7.5 Pages — §11.  ### 7.6 Resize — `Original (No Resize)`, device presets, `Custom…` (W×H); applied last.
+### 7.7 Actions — one row, all visible: `✂ Crop` (commits + shows the crop), `↻ Rotate`
+(rotates pages, preserves cleaning), `🗑 Delete` (removes the Pages selection). Then `💾 Export PDF`.
+### 7.8 Settings/Help & nav — `⚙ Settings`, `? Help`, and page nav `◀  [ n ] /total  ▶` — the
+arrows hug the edges and the page box takes the middle so current/total stay fully visible up
+to 4 digits. This block is the **last card in the scrollable column** (scrolls, not pinned).
 
 ---
 
@@ -226,15 +237,21 @@ Detection yields a **per-page content box** `B_p = (x0,y0,x1,y1)`; offsets and a
 
 - **Normal:** union of text blocks (`get_text("blocks")`, type-0/text only):
   `x0=min bx0, y0=min by0, x1=max bx1, y1=max by1`. Pages with no text → page rect.
-- **Scanned:** `content_box` on the page's cleaned ink mask (§10.4). If no ink → page rect.
+- **Scanned:** `content_box` on a real **Sauvola** clean (`clean_document_bilevel`) of the
+  page, downscaled to `DETECT_MAX_PX` for speed. Sauvola flattens a photographed page's tinted
+  background so the ink mask is the text, not the whole sheet — a global Otsu marks the tinted
+  paper as ink and returns a page-border box. If no ink → page rect.
 
 Then aggregate across the selected pages to fix one size for the whole document:
 ```
-gL = min(x0)   gT = min(y0)   gR = max(x1)   gB = max(y1)     # union span
-W  = gR − gL   H  = gB − gT                                    # constant for ALL pages
+gL = min(x0)   gT = min(y0)                 # top-/left-most content corner (anchor-OFF base)
+W  = max(x1 − x0)   H  = max(y1 − y0)        # LARGEST content width / height across pages
 ```
-Per-page boxes and the aggregates are cached; re-detect and page flips are free. `W` and
-`H` are page-independent (the union span); §9 positions this fixed-size box per page.
+`W` is the widest content box found and `H` the tallest — **not** the bounding span of all
+edges (which would over-crop). So every page crops to the same `W×H`. **Full-page fallback
+boxes are excluded from the aggregate** (any page whose detected box is ≥ 97 % of the sheet
+in both dims): otherwise one failed page would blow `W,H` up to the sheet size and push
+right/bottom to the page edge. Per-page boxes and the aggregates are cached.
 
 `content_box(bilevel)` (robust to scan artifacts):
 ```
@@ -256,19 +273,25 @@ The crop rectangle for page `p` uses **per-page (or global-min) left/top** and t
 **constant size** `W,H` from §8. `w,h` = page size; offsets are percent of page dim:
 
 ```
-left   = (AnchorLeft ? B_p.x0 : gL) − L%·w        # ON: this page's text left; OFF: union-min left
-top    = (AnchorTop  ? B_p.y0 : gT) − T%·h        # ON: this page's text top;  OFF: union-min top
-right  = left + W + R%·w                           # size is constant; R grows it uniformly
-bottom = top  + H + B%·h
+left_base = AnchorLeft ? B_p.x0 : gL              # ON: this page's text left; OFF: union-min left
+top_base  = AnchorTop  ? B_p.y0 : gT              # ON: this page's text top;  OFF: union-min top
+left   = left_base − L%·w                         # each offset moves exactly ONE edge
+top    = top_base  − T%·h
+right  = left_base + W + R%·w                      # anchored to left_base+W, NOT to (offset) left
+bottom = top_base  + H + B%·h                      # anchored to top_base+H,  NOT to (offset) top
 clamp [left,top,right,bottom] to the page rect          # never outside the page
 enforce right−left ≥ MIN_RECT and bottom−top ≥ MIN_RECT
 ```
 
-Anchors affect only left/top (ON = this page's detected edge, OFF = union-minimum edge).
-Width and height are the constant union span, so the box is the **same size on every
-page**; R/B enlarge it uniformly. Consequence: on pages smaller than the union extent the
-right/bottom edges carry margin by design — the cost of uniform output size. **Keep
-ratio:** when R changes, set `B = ((W + R%·w)/ratio − H)/h·100`, with `ratio = W/H`.
+Auto-detect is **inactive** (button disabled, no crop drawn) when Split > 1 **or** both
+anchors are OFF — at least one anchor must pin the frame. Anchors affect only left/top.
+Right/bottom are anchored to `left_base+W` / `top_base+H`, so moving the left edge (`L`)
+leaves the right edge fixed and moving the top edge leaves the bottom fixed — each offset
+is independent, no opposite-edge coupling. Width and height stay the constant `W,H`, so the
+box is the **same size on every page**; R/B enlarge it uniformly. **Keep ratio:** when on,
+the crop height is locked to `width / ratio` (anchored at the top edge) on every render — so
+it holds whether the width changed via the L/R offsets or a handle drag. `ratio` comes from
+the editable ratio field (defaults to the detected `W/H`).
 
 **Drag** (auto mode): apply the cursor delta to the dragged handle's edge(s) of the
 current page's rectangle, then write back each touched offset as a float in a single
@@ -279,6 +302,12 @@ T = (top_base  − new.top  )/h·100      B = (new.bottom − (top_base  + H))/h
 ```
 One edge ↔ one offset ⇒ non-dragged borders are reproduced exactly; opposite-edge jitter
 is structurally impossible. Manual/split rectangles are dragged directly in page units.
+
+**Draw a new crop** (auto mode): press on empty page area (not a handle) and drag to
+rubber-band a fresh rectangle; on release it *replaces* the current crop (its size becomes
+`W,H`, this page's `B_p`, offsets reset to 0, an anchor is enabled if none was). Dragging a
+handle resizes one edge; dragging inside the box moves it. Pressing on a page whose crop is
+already committed (§12) reverts it to the full page so editing can resume.
 
 Handles: 8 diamonds (corners + edge midpoints), hit radius `HANDLE_R+slack`; cursors map
 to resize directions; clicking outside any handle starts a new rectangle (and exits auto
@@ -328,8 +357,11 @@ correction angle, white border fill).
 
 Four buttons always visible together: `All · Odd · Even · Selected` (1-indexed; Odd =
 pages 1,3,5 → indices 0,2,4; Even = 2,4,6 → 1,3,5). **Selected** reveals an inline
-**Pattern** field accepting a 1-indexed list with inclusive ranges, e.g. `1,3,5-9,12`; out-of-range values
-are ignored. The resolved index set drives detect, dewarp, clean, apply, and rotate.
+**Pattern** field plus a **⦿ Current** button pinned to the right edge that fills the field
+with the current page and keeps it selected. The Pattern field accepts a 1-indexed list with
+inclusive ranges using `-` **or** `:` and mixes, e.g. `1,3,5-9,12` or `1:4, 10:30, 35, 37`;
+out-of-range values are ignored. The resolved index set drives detect, dewarp, clean, apply,
+rotate, and delete.
 
 ---
 
@@ -342,18 +374,35 @@ are ignored. The resolved index set drives detect, dewarp, clean, apply, and rot
   each as an image page. Reuses processed rasters (no reprocessing).
 - **Resize** applied last: `Original` keeps native size; preset/Custom resamples the crop.
 
-`Export`: `save(garbage=4, deflate=True, clean=True)`.
+**Committed crop is saved state.** Apply Crop stores the crop box(es) per page in an
+`applied` map (this *is* the persisted crop state and is covered by Undo). It is independent
+of the current Pages selection: changing the selection afterwards does **not** un-crop other
+pages. The viewer shows each committed page cropped (overlay/handles hidden); pressing on it
+re-opens it full-size for editing (§9). Dewarp, clean and rotate also repaint immediately.
+
+`Export` (`Ctrl+S`): pre-fills `<original-name>_cropped.pdf`. Iterates **every** page —
+committed pages export cropped, the rest whole — building output images on a worker thread
+with the **progress overlay**, then writes `save(garbage=4, deflate=True)`.
 
 ---
 
-## 13. History, reset, rotate
+## 13. History, reset, rotate, delete
 
-- **History:** doc-state stack, depth `HISTORY_DEPTH` (bounded for memory). Snapshot before
-  any mutating op — crop, rotate, **and dewarp/clean** — so Undo reverts processing too.
-- **Reset page:** reload the current page from `source[i]`; clears its `work`/detect cache.
-- **Rotate:** rotate Pages-selected pages 90° CW in the document **and** rotate their cached
-  `source`/`work` rasters 90° (do not discard) → cleaning survives rotation; subsequent
-  re-clean still derives from `source`.
+- **History:** doc-state stack, depth from the Undo/redo-depth setting (**default 4**).
+  Snapshot before any mutating op — crop (the committed `applied` map), rotate, **and
+  dewarp/clean** — so Undo reverts all of them. Capture includes `applied`, `rotation`,
+  processed flags, detection and offsets (not the rasters); restore clears the raster caches.
+- **Reset (header `⟲`):** resets the whole document to its just-opened state — **re-opens the
+  file** (or reloads the synthetic demo), clearing all crops, rotations, detection, processing
+  and history.
+- **Delete (`🗑`, in the Crop/Rotate/Delete row):** removes the Pages selection from the
+  document (`doc.delete_pages`), rebuilds page sizes, clears caches and reindexes; refuses to
+  delete every page; confirmation dialog first.
+- **Rotate:** a per-page **rotation-angle map** (`rotation[i]` in 0/90/180/270° CW), applied
+  in `_source_image`/`_page_dims`. Rotate adds 90°, drops the page's caches (re-render at the
+  new angle) and its committed crop, and invalidates detection. This is fully **undoable**
+  (angle is snapshotted, not a destroyed raster) and works identically in Normal and Scanned
+  mode — no rotating-the-original-under-a-stale-crop distortion.
 
 ---
 
@@ -385,7 +434,7 @@ three-way segmented control with highlighter pictograms (☀ Light / 🌙 Dark /
 | Output | Default resolution | preset list (no “2K monitor” entry) |
 | Behaviour | Confirm before overwrite | default on |
 | Behaviour | Remember last folder | reopen file dialogs there |
-| Behaviour | Undo / redo depth | numeric field (default 2); bounds the history stack |
+| Behaviour | Undo / redo depth | numeric field (default 4); bounds the history stack |
 | Scan | Dewarp supersample | DEWARP_SS |
 | Scan | Worker threads | batch parallelism (default = CPU count) |
 
@@ -462,10 +511,16 @@ Fonts, paddings, sizes, and theme maps also live here.
 | Mono font | numeric/slice entries, help body |
 | Themes | dark / light token maps: bg, panel(2/3), border, text, muted, accent, select, badge(normal/scan), handle, ok, warn, canvas |
 
-Toggle switches and segmented buttons are custom-drawn; active segment/toggle uses the
-`select`/accent tokens; disabled controls dim to `muted`.
-The scale of the interface should be scale up and down with cntr+ cntrl-
-The design should be aligned with mid 2026 design guides.
+**Palette: warm-gray chrome + a clear blue accent.** Defined in `smartcrop/ui/theme.py`.
+Cards/chrome are warm off-white / warm charcoal; **buttons are neutral at rest** and only
+highlight (the blue `ACCENT`) when they represent an active/pressed state — toggles (Dewarp,
+B/W, Grayscale) while on, and Auto-detect while a detection is live (not after Clear or a new
+draw). Switch-"on", segmented-selected, the crop frame (`CROP_BLUE`) and split rectangles
+(`SPLIT_BLUE`, one dark blue for all, thick lines + large ① numbers, no circle) all use blue
+so highlights read clearly. The status strip sits on a card chip with prominent text. The
+mode pill is a non-interactive marker. Disabled controls dim. Every label stays legible in
+both modes. UI scales with `Ctrl +/-` (`Ctrl 0` resets); 100 % zoom = system display scaling.
+Window title shows the open file name. Design aligned with mid-2026 guidance.
 
 ---
 
@@ -480,7 +535,7 @@ The design should be aligned with mid 2026 design guides.
 - Custom resolution non-positive/unparseable → error dialog, abort.
 - docuwarp/onnxruntime missing → dewarp falls back to deskew-only with one warning.
 - Worker exception → error dialog; busy state cleared; document untouched.
-- Mode switch leaves no empty gap at the panel top; bottom bar stays pinned.
+- Mode switch leaves no empty gap at the panel top; the whole control column scrolls as one.
 
 ---
 

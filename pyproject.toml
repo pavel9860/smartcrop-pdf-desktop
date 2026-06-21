@@ -1,6 +1,19 @@
 [project]
 name = "smartcropdf"
-version = "0.1.0"
-description = "Simple tool to make books comfortabe to read"
+version = "0.9.0"
+description = "Crop, straighten and clean PDFs and scans for comfortable e-reader reading."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "customtkinter>=5.2",
+    "pymupdf>=1.24",
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dewarp = ["docuwarp", "onnxruntime>=1.18"]
+test = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

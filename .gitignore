@@ -1,9 +1,29 @@
-﻿.venv/
-algorithms_test/
-uv.lock
+# Python caches / build
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test / type caches
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+
+# Editors / OS
 .idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs & scratch
+*.log
+
+# Large local test assets (keep the repo light; tests skip if absent)
+tests/assets/*.pdf

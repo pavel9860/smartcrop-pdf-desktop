@@ -50,8 +50,10 @@ def parse_page_expr(expr: str, total: int) -> List[int]:
 
 def parse_selection(expr: str, total: int) -> List[int]:
     """1-indexed human page selection → sorted 0-based indices.
-    Accepts comma-separated page numbers and inclusive ranges: '1,3,5-9,12'.
-    Out-of-range values are ignored. Empty raises ValueError.
+
+    Accepts comma-separated page numbers, inclusive ranges with '-' or ':' (both 1-indexed
+    inclusive, so '1:4' and '1-4' both mean pages 1,2,3,4), and mixes like
+    '1:4, 10:30, 35, 37'. Out-of-range values are ignored. Empty raises ValueError.
     """
     expr = (expr or "").strip()
     if not expr:
@@ -61,8 +63,9 @@ def parse_selection(expr: str, total: int) -> List[int]:
         tok = tok.strip()
         if not tok:
             continue
-        if "-" in tok.lstrip("-"):            # a-b range (not a leading minus)
-            a, _, b = tok.partition("-")
+        sep = ":" if ":" in tok else ("-" if "-" in tok.lstrip("-") else None)
+        if sep:                               # a-b / a:b inclusive range
+            a, _, b = tok.partition(sep)
             lo, hi = int(a), int(b)
             if lo > hi:
                 lo, hi = hi, lo
