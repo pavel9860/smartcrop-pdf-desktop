@@ -27,7 +27,8 @@ from PIL import Image, ImageDraw, ImageTk
 import imaging
 from constants import RESOLUTIONS, THEMES
 from geometry import (Box, MIN_RECT, HANDLE_CURSOR, auto_crop_rect, clamp_box,
-                      hit_handle, move_box, point_in_box, resize_by_handle, union_box)
+                      hit_handle, move_box, point_in_box, resize_by_handle,
+                      rotate_box_cw, union_box)
 
 SRC_DPI = 200.0
 NORMAL_DPI = 150.0
@@ -239,7 +240,12 @@ class TestUIApp:
                 ToolTip(btn, mapping[val], self)
 
     def _build_bottom_bar(self) -> None:
-        # Part of the scrollable column (scrolls with everything else, B#1), not pinned.
+        # Settings/Help + nav is the last card. A flexible spacer above it grows to push the
+        # card to the visible bottom of the panel when the column is shorter than the
+        # viewport (so it looks pinned), and collapses to nothing when the column overflows,
+        # letting the card scroll into reach like any other card (#5).
+        self._bb_spacer = ctk.CTkFrame(self.controls, fg_color="transparent", height=1)
+        self._bb_spacer.pack(fill="x")
         bar = ctk.CTkFrame(self.controls, fg_color=CARD, corner_radius=12, border_width=1,
                            border_color=CARD_BORDER)
         bar.pack(fill="x", padx=4, pady=(2, 8))
@@ -269,6 +275,25 @@ class TestUIApp:
         self.page_total = ctk.CTkLabel(pagebox, text="/ 0", font=self.font_base, text_color=MUTED)
         self.page_total.pack(side="left", padx=(8, 0))
         self._btn(row2, "▶", self.next_page, width=46).grid(row=0, column=2, sticky="e")
+        # Reflow whenever the viewport height changes; content-height changes call it directly.
+        self.controls._parent_canvas.bind("<Configure>", self._reflow_bottom_bar, add="+")
+        self.root.after_idle(self._reflow_bottom_bar)
+
+    def _reflow_bottom_bar(self, _e=None) -> None:
+        """Size the spacer so the Settings/Help+nav card sits at the panel bottom when there
+        is room, and collapses (card scrolls) when the column overflows the viewport (#5)."""
+        if not hasattr(self, "_bb_spacer"):
+            return
+        try:
+            self.controls.update_idletasks()
+            viewport = self.controls._parent_canvas.winfo_height()
+            cur = self._bb_spacer.winfo_height()
+            content = self.controls.winfo_reqheight() - cur     # column height sans the spacer
+            target = max(1, viewport - content)
+            if abs(target - cur) > 2:
+                self._bb_spacer.configure(height=target)
+        except tk.TclError:
+            pass
 
     def _build_doc_section(self) -> None:
         def badge(head):
@@ -389,6 +414,8 @@ class TestUIApp:
             sp = Spin(cell, var, self, width=48)
             sp.pack(side="left", fill="x", expand=True)
             ToolTip(sp.entry, OFFSET_TIP[lab], self)
+            sp.entry.bind("<FocusOut>", self._clamp_offsets, add="+")   # snap to page limits (#7)
+            sp.entry.bind("<Return>", self._clamp_offsets, add="+")
             self._off_spins.append(sp)
         for var in (self.left_off, self.top_off, self.bottom_off):
             var.trace_add("write", lambda *_: self._on_offset_change())
@@ -673,6 +700,7 @@ class TestUIApp:
             else:
                 self.scan_card.pack_forget()
             self.controls._parent_canvas.yview_moveto(0.0)   # no gap at top after switch
+            self.root.after_idle(self._reflow_bottom_bar)
         self._refresh_mode_badge()
         self.render_page()
 
@@ -907,6 +935,46 @@ class TestUIApp:
 
     def _on_right_change(self):
         self.render_page()                           # ratio (if on) is enforced in _crop_rect
+
+    def _clamp_offsets(self, _e=None):
+        """On commit (Return / focus-out), snap each offset to the largest value the page
+        actually allows, so the crop edge lands on the page border / opposite side instead
+        of accepting absurd numbers like 100000 (#7). Done by round-tripping the crop
+        through clamp_box and reading each edge back out as its offset."""
+        if not (self.auto_active and self._union):   # no live crop → just bound to ±100
+            self._suspend = True
+            for var in (self.left_off, self.top_off, self.right_off, self.bottom_off):
+                try:
+                    v = float(var.get())
+                except (tk.TclError, ValueError):
+                    v = 0.0
+                var.set(round(max(-100.0, min(100.0, v)), 1))
+            self._suspend = False
+            self.render_page()
+            return
+        idx = self.current_page
+        rect = self._crop_rect(idx)                  # already clamped to the page (and ratio)
+        if rect is None:
+            return
+        w, h = self._page_dims(idx)
+        b = self._detect_cache.get(idx) or Box(0, 0, w, h)
+        u = self._union
+        lb = b.x0 if self.auto_left_var.get() else u.x0
+        tb = b.y0 if self.auto_top_var.get() else u.y0
+        self._suspend = True
+        self.left_off.set(round((lb - rect.x0) / w * 100.0, 1))
+        self.top_off.set(round((tb - rect.y0) / h * 100.0, 1))
+        self.right_off.set(round((rect.x1 - (lb + u.width)) / w * 100.0, 1))
+        if not self.keep_ratio_var.get():            # B is inert (derived) when ratio is locked
+            self.bottom_off.set(round((rect.y1 - (tb + u.height)) / h * 100.0, 1))
+        else:
+            try:
+                bv = float(self.bottom_off.get())
+            except (tk.TclError, ValueError):
+                bv = 0.0
+            self.bottom_off.set(round(max(-100.0, min(100.0, bv)), 1))
+        self._suspend = False
+        self.render_page()
 
     def _on_anchor(self):
         self._refresh_detect_enabled()               # both anchors OFF ⇒ detect inactive (#4)
@@ -1205,6 +1273,7 @@ class TestUIApp:
             self.same_size_row.pack(fill="x", pady=(8, 0))
         else:
             self.same_size_row.pack_forget()
+        self.root.after_idle(self._reflow_bottom_bar)
         if hasattr(self, "btn_apply"):
             ok = self.split_count == 1 or len(self.crop_rects) == self.split_count
             self.btn_apply.configure(state="normal" if ok and not self._busy else "disabled")
@@ -1220,13 +1289,14 @@ class TestUIApp:
         self._refresh_detect_enabled()
 
     def _refresh_detect_enabled(self):
-        """Auto-detect is active only at split=1 with at least one anchor ON (spec §7.4).
-        It is highlighted only while a detection is live (not after Clear / a new draw, #16)."""
+        """Auto-detect is available at split=1 with at least one anchor ON (spec §7.4).
+        It is an *action*, never a stuck toggle: it stays neutral (never highlighted) and
+        re-pressable at any time so re-running after editing the crop always works (#2)."""
         one_anchor = self.auto_left_var.get() or self.auto_top_var.get()
         ok = self.split_count == 1 and one_anchor and not self._busy
         if hasattr(self, "btn_detect"):
             self.btn_detect.configure(state="normal" if ok else "disabled")
-            self._set_active(self.btn_detect, self.auto_active and self.split_count == 1)
+            self._set_active(self.btn_detect, False)
 
     # ════════════════════════════════════════════════════════════════════
     #  SCAN PROCESSING
@@ -1285,6 +1355,8 @@ class TestUIApp:
         if len(indices) <= 1:                        # multi-page ⇒ show progress (#12, #17)
             on_done({i: work_fn(i) for i in indices})
             return
+        for i in indices:                            # render PyMuPDF rasters on the MAIN thread;
+            self._source_image(i)                    # workers then touch only cached np/cv2 (inv.#10)
         self._busy = True
         self._set_controls_enabled(False)
         q: "queue.Queue" = queue.Queue()
@@ -1352,12 +1424,14 @@ class TestUIApp:
             self.select_row.pack(fill="x", pady=(8, 0))
         else:
             self.select_row.pack_forget()
+        self.root.after_idle(self._reflow_bottom_bar)
 
     def _sync_resize_ui(self):
         if self.resize_var.get() == "Custom…":
             self.custom_row.pack(fill="x", pady=(8, 0))
         else:
             self.custom_row.pack_forget()
+        self.root.after_idle(self._reflow_bottom_bar)
 
     def _target_size(self, w, h):
         val = self.resize_var.get()
@@ -1460,14 +1534,24 @@ class TestUIApp:
             return
         self._snapshot_history()
         for i in indices:                            # angle-map rotate: undoable, works in scan mode
+            w, h = self._page_dims(i)                # page size BEFORE this 90° step
             self._rotation[i] = (self._rotation.get(i, 0) + 90) % 360
-            for d in (self._source_cache, self._work_cache, self._detect_cache, self._applied):
-                d.pop(i, None)                       # re-render at new angle; drop any committed crop
-        self._union = None
-        self.auto_active = False
+            for d in (self._source_cache, self._work_cache):
+                d.pop(i, None)                       # re-render at the new angle
+            if i in self._applied:                   # carry the committed crop through the turn (#6)
+                self._applied[i] = [rotate_box_cw(b, w, h) for b in self._applied[i]]
+            if i in self._detect_cache:              # keep the detected content box too
+                self._detect_cache[i] = rotate_box_cw(self._detect_cache[i], w, h)
+        if self.auto_active and self._detect_cache:  # rebuild the live frame from rotated boxes
+            self._union = union_box(list(self._detect_cache.values()))
+            self._suspend = True                     # L/T/R/B map to rotated edges → reset to 0
+            for var in (self.left_off, self.top_off, self.right_off, self.bottom_off):
+                var.set(0.0)
+            self._suspend = False
+            self._sync_ratio_label()
         self._refresh_detect_enabled()
         self.render_page()
-        self.status_msg(f"Rotated {len(indices)} page(s) 90° CW.")
+        self.status_msg(f"Rotated {len(indices)} page(s) 90° CW; crop preserved.")
 
     # ════════════════════════════════════════════════════════════════════
     #  HISTORY
@@ -1551,11 +1635,24 @@ class TestUIApp:
         self.doc.delete_pages(idxs)                   # fitz reindexes the remaining pages
         self._pt_size = [(self.doc[i].rect.width, self.doc[i].rect.height)
                          for i in range(self.doc.page_count)]
-        for d in (self._source_cache, self._work_cache, self._detect_cache, self._processed,
-                  self._applied, self._rotation):     # indices shifted → caches invalid
-            d.clear()
-        self._union = None
-        self.auto_active = False
+        deleted = set(idxs)
+
+        def _reindex(d):
+            """Drop deleted pages, shift surviving keys down — adjustments (crop, filter,
+            dewarp, rotation, detection) on the kept pages are preserved, not wiped (#8)."""
+            return {o - sum(1 for x in idxs if x < o): v
+                    for o, v in d.items() if o not in deleted}
+        self._source_cache = _reindex(self._source_cache)
+        self._work_cache = _reindex(self._work_cache)
+        self._detect_cache = _reindex(self._detect_cache)
+        self._processed = _reindex(self._processed)
+        self._applied = _reindex(self._applied)
+        self._rotation = _reindex(self._rotation)
+        if self.auto_active and self._detect_cache:   # rebuild the union over surviving boxes
+            self._union = union_box(list(self._detect_cache.values()))
+        else:
+            self._union = None
+            self.auto_active = False
         self.history.clear(); self.redo_stack.clear()
         self.current_page = min(self.current_page, self.page_count() - 1)
         self._refresh_detect_enabled()

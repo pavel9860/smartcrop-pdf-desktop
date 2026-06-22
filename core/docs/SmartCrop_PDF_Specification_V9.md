@@ -131,10 +131,13 @@ geometry/drag/render code path serves both modes.
 ## 6. Window layout (console art)
 
 Two panes split by a draggable sash. Left = a single **scrollable control stack** ending
-with the Settings/Help + page-nav card (it scrolls with everything else — nothing is pinned;
-the panel keeps a fixed width via `pack_propagate(False)`). Right = page canvas with a
-**centered inline progress overlay** and a bottom-right status strip. Scanned-only sections
-pack/unpack with no residual gap.
+with the Settings/Help + page-nav card. That last card is **anchored to the panel bottom
+when the column is shorter than the viewport** (a flexible spacer above it grows to fill the
+gap, so it sits at the bottom instead of floating right under Export PDF); when the column
+overflows the viewport the spacer collapses to nothing and the card scrolls into reach like
+any other card (partially/fully hidden until scrolled to). The panel keeps a fixed width via
+`pack_propagate(False)`. Right = page canvas with a **centered inline progress overlay** and
+a bottom-right status strip. Scanned-only sections pack/unpack with no residual gap.
 
 ```
 ┌──────────────────────────────────┬───────────────────────────────────────────────┐
@@ -215,10 +218,10 @@ quadrants).
 ### 7.4 Detect
 | Control | Action | Behavior |
 |---|---|---|
-| `✦ Auto-detect` | detect | per-page content box (§8); scanned mode shows the progress overlay. **Disabled** when Split > 1 or both anchors are OFF |
+| `✦ Auto-detect` | detect | per-page content box (§8); scanned mode shows the progress overlay. **Disabled** only when Split > 1 or both anchors are OFF. It is an **action, not a toggle** — it is *never* highlighted and stays re-pressable at any time (re-running after editing/dragging the crop always works) |
 | `Anchor Left` / `Anchor Top` (toggles) | re-render | left/top edge from detected text (ON) or union edge (OFF); toggling re-evaluates whether Auto-detect is active |
 | `Keep ratio` (toggle) | — | editing R also sets B to hold the current page's detected aspect |
-| `L T R B` (label inline with the field; default font; range ±100, step 0.1) | re-render | per-edge percent offsets; each moves exactly one edge |
+| `L T R B` (label inline with the field; default font; range ±100, step 0.1) | re-render | per-edge percent offsets; each moves exactly one edge. **On commit (Return / focus-out) each offset snaps to the largest value the page allows** — an out-of-range entry (e.g. 100000) is reduced to the value that lands the edge on the page border / opposite side, never accepted as-is |
 | `✕ Clear` | clear | drop detection + offsets |
 
 ### 7.5 Pages — §11.  ### 7.6 Resize — `Original (No Resize)`, device presets, `Custom…` (W×H); applied last.
@@ -226,7 +229,9 @@ quadrants).
 (rotates pages, preserves cleaning), `🗑 Delete` (removes the Pages selection). Then `💾 Export PDF`.
 ### 7.8 Settings/Help & nav — `⚙ Settings`, `? Help`, and page nav `◀  [ n ] /total  ▶` — the
 arrows hug the edges and the page box takes the middle so current/total stay fully visible up
-to 4 digits. This block is the **last card in the scrollable column** (scrolls, not pinned).
+to 4 digits. This is the **last card in the scrollable column**; a flexible spacer above it
+keeps it anchored at the panel bottom when there is room, and lets it scroll (partially/fully
+hidden) when the column is taller than the viewport.
 
 ---
 
@@ -293,6 +298,12 @@ the crop height is locked to `width / ratio` (anchored at the top edge) on every
 it holds whether the width changed via the L/R offsets or a handle drag. `ratio` comes from
 the editable ratio field (defaults to the detected `W/H`).
 
+**Offset commit clamp:** offsets are bounded to ±100 and, on commit (Return / focus-out),
+snapped to the page-limited maximum — the crop rect is round-tripped through `clamp_box` and
+each edge is read back out as its offset, so a value that would push an edge past the page
+border (or its opposite edge) is rewritten to the largest in-bounds value instead of being
+kept verbatim.
+
 **Drag** (auto mode): apply the cursor delta to the dragged handle's edge(s) of the
 current page's rectangle, then write back each touched offset as a float in a single
 trace-suppressed batch and render once:
@@ -357,11 +368,13 @@ correction angle, white border fill).
 
 Four buttons always visible together: `All · Odd · Even · Selected` (1-indexed; Odd =
 pages 1,3,5 → indices 0,2,4; Even = 2,4,6 → 1,3,5). **Selected** reveals an inline
-**Pattern** field plus a **⦿ Current** button pinned to the right edge that fills the field
-with the current page and keeps it selected. The Pattern field accepts a 1-indexed list with
-inclusive ranges using `-` **or** `:` and mixes, e.g. `1,3,5-9,12` or `1:4, 10:30, 35, 37`;
-out-of-range values are ignored. The resolved index set drives detect, dewarp, clean, apply,
-rotate, and delete.
+**Pattern** field plus a **⦿ Current** *button* (a real push-button styled like the other
+buttons, not a checkbox) pinned to the right edge that fills the field with the current page
+and keeps it selected. The Pattern field accepts a 1-indexed list of page numbers, inclusive
+`a-b` ranges, and **Python-style colon slices `start:stop[:step]`** (1-indexed inclusive,
+optional ends, optional step — `1:4`==`1-4`==pages 1-4, `1:100:5`==1,6,…,96, `::2`==every odd
+page, `10:`==page 10 to the end), and mixes like `1:4, 10:30, 35, 37`; out-of-range values are
+ignored. The resolved index set drives detect, dewarp, clean, apply, rotate, and delete.
 
 ---
 
@@ -396,13 +409,17 @@ with the **progress overlay**, then writes `save(garbage=4, deflate=True)`.
   file** (or reloads the synthetic demo), clearing all crops, rotations, detection, processing
   and history.
 - **Delete (`🗑`, in the Crop/Rotate/Delete row):** removes the Pages selection from the
-  document (`doc.delete_pages`), rebuilds page sizes, clears caches and reindexes; refuses to
-  delete every page; confirmation dialog first.
+  document (`doc.delete_pages`), rebuilds page sizes, then **reindexes** every per-page map
+  (source/work caches, detection, processed flags, committed crops, rotation): deleted pages'
+  entries are dropped and surviving keys shift down, so **adjustments on the kept pages are
+  preserved**, not wiped. Refuses to delete every page; confirmation dialog first.
 - **Rotate:** a per-page **rotation-angle map** (`rotation[i]` in 0/90/180/270° CW), applied
-  in `_source_image`/`_page_dims`. Rotate adds 90°, drops the page's caches (re-render at the
-  new angle) and its committed crop, and invalidates detection. This is fully **undoable**
-  (angle is snapshotted, not a destroyed raster) and works identically in Normal and Scanned
-  mode — no rotating-the-original-under-a-stale-crop distortion.
+  in `_source_image`/`_page_dims`. Rotate adds 90° and drops only the page's *rasters* (so they
+  re-render at the new angle); the **committed crop and the detected content box are carried
+  through the turn** by rotating their coordinates 90° CW (`rotate_box_cw`), so cropping is
+  *not* undone by rotation. Live auto-detect offsets reset to 0 (their L/T/R/B map to the
+  rotated edges) and the union is rebuilt from the rotated boxes. Fully **undoable** (angle +
+  transformed boxes are snapshotted) and identical in Normal and Scanned mode.
 
 ---
 
@@ -513,9 +530,10 @@ Fonts, paddings, sizes, and theme maps also live here.
 
 **Palette: warm-gray chrome + a clear blue accent.** Defined in `smartcrop/ui/theme.py`.
 Cards/chrome are warm off-white / warm charcoal; **buttons are neutral at rest** and only
-highlight (the blue `ACCENT`) when they represent an active/pressed state — toggles (Dewarp,
-B/W, Grayscale) while on, and Auto-detect while a detection is live (not after Clear or a new
-draw). Switch-"on", segmented-selected, the crop frame (`CROP_BLUE`) and split rectangles
+highlight (the blue `ACCENT`) when they represent an active/pressed state — the toggles
+(Dewarp, B/W, Grayscale) while on. **Auto-detect is an action, not a toggle: it never
+highlights** and stays re-pressable so it always works after editing the crop. Switch-"on",
+segmented-selected, the crop frame (`CROP_BLUE`) and split rectangles
 (`SPLIT_BLUE`, one dark blue for all, thick lines + large ① numbers, no circle) all use blue
 so highlights read clearly. The status strip sits on a card chip with prominent text. The
 mode pill is a non-interactive marker. Disabled controls dim. Every label stays legible in
@@ -555,7 +573,8 @@ Redo · `←`/`→` and `PgUp`/`PgDn` previous/next page · page field `Enter` j
 2. Dragging any handle leaves every non-dragged edge pixel-stable across the whole drag.
 3. Repeated Dewarp/Clean presses produce the same `work` as one press (idempotent from source).
 4. Undo reverts dewarp, clean, crop, and rotate; Reset returns the current page to `source`.
-5. Rotate preserves applied cleaning.
+5. Rotate preserves applied cleaning **and the committed/detected crop** (boxes are rotated
+   with the page, not dropped); Delete preserves the kept pages' adjustments (reindex, no wipe).
 6. Nothing in scanned processing runs without an explicit button press.
 7. Crop rectangles never extend outside the page.
 8. UI never blocks during batch processing; Cancel stops promptly; the overlay (not a

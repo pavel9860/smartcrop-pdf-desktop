@@ -47,6 +47,26 @@ class TestParseSelection:
         got = parse_selection("1:4, 8-9, 12", 40)
         assert got == [0, 1, 2, 3, 7, 8, 11]
 
+    def test_step_slice(self):                            # #4: python-style start:stop:step
+        assert parse_selection("1:100:5", 100) == [0, 5, 10, 15, 20, 25, 30, 35, 40,
+                                                    45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+
+    def test_open_ended_slices(self):
+        assert parse_selection("::2", 6) == [0, 2, 4]     # every odd page
+        assert parse_selection("10:", 12) == [9, 10, 11]  # page 10 to the end
+        assert parse_selection(":3", 10) == [0, 1, 2]     # start to page 3
+
+    def test_negative_step_slice(self):
+        assert parse_selection("100:1:-25", 100) == [24, 49, 74, 99]
+
+    def test_too_many_colons_raises(self):
+        with pytest.raises(ValueError):
+            parse_selection("1:2:3:4", 10)
+
+    def test_zero_step_raises(self):
+        with pytest.raises(ValueError):
+            parse_selection("1:5:0", 10)
+
     def test_empty_raises(self):
         with pytest.raises(ValueError):
             parse_selection("   ", 10)

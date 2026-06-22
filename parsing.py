@@ -48,12 +48,39 @@ def parse_page_expr(expr: str, total: int) -> List[int]:
     return sorted(result)
 
 
+def _colon_slice(tok: str, total: int) -> List[int]:
+    """A 1-indexed inclusive colon slice `start:stop[:step]` → 1-based page numbers.
+
+    Ends are optional and default to the full document, so Python-style slices work:
+    `1:100:5` → 1,6,…,96; `::2` → every odd page; `10:` → page 10 to the end. A two-part
+    `a:b` (no step) is order-agnostic and inclusive (`1:4` == `4:1` == 1,2,3,4); a three-part
+    slice honours its step's direction. Out-of-range pages are dropped by the caller.
+    """
+    parts = tok.split(":")
+    if len(parts) > 3:
+        raise ValueError(f"Too many colons in token: {tok!r}")
+
+    def gi(s: str, default: int) -> int:
+        s = s.strip()
+        return default if s == "" else int(s)
+
+    step = gi(parts[2], 1) if len(parts) == 3 else 1
+    if step == 0:
+        raise ValueError("Slice step cannot be zero.")
+    start = gi(parts[0], 1 if step > 0 else total)
+    stop = gi(parts[1], total if step > 0 else 1)
+    if len(parts) == 2 and step > 0 and start > stop:     # 'a:b' inclusive, order-agnostic
+        start, stop = stop, start
+    return list(range(start, stop + (1 if step > 0 else -1), step))
+
+
 def parse_selection(expr: str, total: int) -> List[int]:
     """1-indexed human page selection → sorted 0-based indices.
 
-    Accepts comma-separated page numbers, inclusive ranges with '-' or ':' (both 1-indexed
-    inclusive, so '1:4' and '1-4' both mean pages 1,2,3,4), and mixes like
-    '1:4, 10:30, 35, 37'. Out-of-range values are ignored. Empty raises ValueError.
+    Accepts comma-separated page numbers, inclusive ranges with '-', and Python-style
+    colon slices `start:stop[:step]` (1-indexed inclusive; '1:4' == '1-4' == pages 1-4,
+    '1:100:5' == 1,6,…,96). Mixes like '1:4, 10:30, 35, 37' work. Out-of-range values are
+    ignored. Empty raises ValueError.
     """
     expr = (expr or "").strip()
     if not expr:
@@ -63,17 +90,17 @@ def parse_selection(expr: str, total: int) -> List[int]:
         tok = tok.strip()
         if not tok:
             continue
-        sep = ":" if ":" in tok else ("-" if "-" in tok.lstrip("-") else None)
-        if sep:                               # a-b / a:b inclusive range
-            a, _, b = tok.partition(sep)
+        if ":" in tok:                        # start:stop[:step] slice
+            pages = _colon_slice(tok, total)
+        elif "-" in tok.lstrip("-"):          # a-b inclusive range
+            a, _, b = tok.partition("-")
             lo, hi = int(a), int(b)
             if lo > hi:
                 lo, hi = hi, lo
-            for p in range(lo, hi + 1):
-                if 1 <= p <= total:
-                    out.add(p - 1)
+            pages = range(lo, hi + 1)
         else:
-            p = int(tok)
+            pages = [int(tok)]
+        for p in pages:
             if 1 <= p <= total:
                 out.add(p - 1)
     return sorted(out)

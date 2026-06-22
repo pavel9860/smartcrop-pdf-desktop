@@ -6,7 +6,7 @@ import pytest
 
 from geometry import (MIN_RECT, Box, auto_crop_rect, clamp_box, hit_handle,
                                 handle_positions, move_box, point_in_box, resize_by_handle,
-                                union_box)
+                                rotate_box_cw, union_box)
 
 W, H = 595.0, 842.0                                   # an A4-ish page
 
@@ -193,3 +193,21 @@ class TestAutoCropRect:
         base = self._crop(self.pageA, True, True)
         moved = self._crop(self.pageA, True, True, l=8.0)
         assert moved.y1 == base.y1                                 # bottom stays put
+
+
+class TestRotateBoxCw:
+    """rotate_box_cw lets crops/detection survive a 90° page turn (#6)."""
+
+    def test_maps_corners_into_rotated_page(self):
+        # (x,y) -> (h - y, x); page w×h -> h×w. Box stays in-bounds of the rotated page.
+        b = rotate_box_cw(Box(10, 20, 30, 60), 100.0, 200.0)
+        assert b == Box(200 - 60, 10, 200 - 20, 30)                # (140, 10, 180, 30)
+        assert 0 <= b.x0 <= b.x1 <= 200 and 0 <= b.y0 <= b.y1 <= 100
+
+    def test_four_turns_return_original(self):
+        b0 = Box(12, 34, 56, 78)
+        b, w, h = b0, 595.0, 842.0
+        for _ in range(4):
+            b = rotate_box_cw(b, w, h)
+            w, h = h, w                                            # dims swap each quarter turn
+        assert b == b0

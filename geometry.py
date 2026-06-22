@@ -74,6 +74,13 @@ def move_box(box: Box, dx: float, dy: float, w: float, h: float) -> Box:
     return Box(nx0, ny0, nx0 + box.width, ny0 + box.height)
 
 
+def rotate_box_cw(b: Box, w: float, h: float) -> Box:
+    """A box in a `w`×`h` page, rotated 90° clockwise → its coordinates in the resulting
+    `h`×`w` page. Lets crops/detection survive a page rotation instead of being dropped.
+    Four applications return the original box (rotate_box_cw is its own 4-cycle)."""
+    return Box(h - b.y1, b.x0, h - b.y0, b.x1)
+
+
 def handle_positions(box: Box) -> Dict[str, Tuple[float, float]]:
     """The 8 handle anchor points in page coordinates."""
     mx, my = (box.x0 + box.x1) / 2.0, (box.y0 + box.y1) / 2.0
