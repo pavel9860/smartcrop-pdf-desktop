@@ -12,21 +12,21 @@ import pytest
 
 import fitz
 
-from helpers import ASSETS, image_coverage, render_page_bgr
-import imaging
+from helpers import ASSETS, render_page_bgr
+import core.imaging as imaging
 
 BOOK = ASSETS / "test_pdf_native.pdf"
 DISTORTED = ASSETS / "test_pdf_scan.pdf"
 
 MODE_TEXT_MIN = 8
-MODE_IMG_COVER = 0.60
 
 
 def _classify(doc, idx):
+    """Per-page classification by vector data (§4): native if text ≥ MODE_TEXT_MIN or a vector
+    drawing path; image-only otherwise."""
     page = doc[idx]
-    if len(page.get_text().strip()) < MODE_TEXT_MIN and image_coverage(doc, idx) >= MODE_IMG_COVER:
-        return "scanned"
-    return "normal"
+    native = len(page.get_text().strip()) >= MODE_TEXT_MIN or bool(page.get_drawings())
+    return "normal" if native else "scanned"
 
 
 # --------------------------------------------------------------- normal book PDF
@@ -55,8 +55,9 @@ class TestNormalBook:
 class TestDistortedScan:
     def test_pages_classify_scanned(self):
         with fitz.open(str(DISTORTED)) as doc:
-            assert _classify(doc, 0) == "scanned"
-            assert image_coverage(doc, 0) >= MODE_IMG_COVER
+            assert _classify(doc, 0) == "scanned"           # image-only: no text, no vector path
+            assert len(doc[0].get_text().strip()) < MODE_TEXT_MIN
+            assert not doc[0].get_drawings()
 
     def test_estimate_skew_runs(self):
         with fitz.open(str(DISTORTED)) as doc:

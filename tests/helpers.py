@@ -71,15 +71,3 @@ def render_page_bgr(doc: fitz.Document, idx: int, dpi: int = 150) -> np.ndarray:
     pm = doc[idx].get_pixmap(dpi=int(dpi), alpha=False)
     rgb = np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.height, pm.width, 3)
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-
-def image_coverage(doc: fitz.Document, idx: int) -> float:
-    """Largest embedded-image area as a fraction of page area (mode-classifier input)."""
-    page = doc[idx]
-    area = page.rect.width * page.rect.height
-    cov = 0.0
-    for info in page.get_image_info():
-        bbox = info.get("bbox")
-        if bbox:
-            cov = max(cov, abs((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / max(area, 1.0))
-    return cov

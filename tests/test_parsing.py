@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from parsing import pages_for_mode, parse_page_expr, parse_selection
+from core.parsing import pages_for_mode, parse_page_expr, parse_selection
 
 
 class TestPagesForMode:

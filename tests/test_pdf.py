@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import fitz
 
-from helpers import image_coverage, render_page_bgr
-import imaging
+from helpers import make_sample_pdf, render_page_bgr
+import core.imaging as imaging
+from core.document import DocumentMixin
 
 MODE_TEXT_MIN = 8
-MODE_IMG_COVER = 0.60
 
 
 def _classify(doc, idx):
+    """Per-page classification by vector data (§4): native (Normal) if the page has real text
+    (≥ MODE_TEXT_MIN) or any vector drawing path; image-only (Scanned) otherwise."""
     page = doc[idx]
-    if len(page.get_text().strip()) < MODE_TEXT_MIN and image_coverage(doc, idx) >= MODE_IMG_COVER:
-        return "scanned"
-    return "normal"
+    native = len(page.get_text().strip()) >= MODE_TEXT_MIN or bool(page.get_drawings())
+    return "normal" if native else "scanned"
 
 
 def test_sample_pdf_written(sample_pdf_path):
@@ -32,9 +33,24 @@ def test_normal_pages_have_vector_text(sample_doc):
 
 
 def test_scanned_pages_classified_scanned(sample_doc):
-    for i in (3, 4):
-        assert image_coverage(sample_doc, i) >= MODE_IMG_COVER
+    for i in (3, 4):                                     # image-only: no text, no vector path
+        assert len(sample_doc[i].get_text().strip()) < MODE_TEXT_MIN
+        assert not sample_doc[i].get_drawings()
         assert _classify(sample_doc, i) == "scanned"
+
+
+def test_combine_pdf_and_images_builds_one_document(tmp_path):
+    from PIL import Image
+    pdf = make_sample_pdf(tmp_path / "doc.pdf", normal_pages=2, scanned_pages=0)
+    png = tmp_path / "p.png"; Image.new("RGB", (200, 320), "white").save(png)
+    jpg = tmp_path / "q.jpg"; Image.new("RGB", (150, 400), "white").save(jpg)
+    combined = DocumentMixin._combine_files([str(pdf), str(png), str(jpg)])
+    try:
+        assert combined.page_count == 4                 # 2 PDF pages then 1 page per image
+        assert combined[0].get_text().strip()           # PDF pages first (carry text)
+        assert not combined[2].get_text().strip()       # image pages last (no text)
+    finally:
+        combined.close()
 
 
 def test_scanned_page_deskews(sample_doc):

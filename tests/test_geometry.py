@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from geometry import (MIN_RECT, Box, auto_crop_rect, clamp_box, hit_handle,
-                                handle_positions, move_box, point_in_box, resize_by_handle,
-                                rotate_box_cw, union_box)
+from core.geometry import (MIN_RECT, Box, auto_crop_rect, clamp_box, fit_box_keep_size,
+                                handle_positions, hit_handle, move_box, point_in_box,
+                                resize_by_handle, rotate_box_cw, union_box)
 
 W, H = 595.0, 842.0                                   # an A4-ish page
 
@@ -32,6 +32,19 @@ class TestClamp:
     def test_overflow_clamped_to_page(self):
         b = clamp_box(Box(100, 100, 9999, 9999), W, H)
         assert b.x1 == W and b.y1 == H
+
+    def test_fit_keep_size_shifts_not_shrinks(self):
+        # overhang right+bottom → shift inward, size preserved
+        b = fit_box_keep_size(Box(W - 50, H - 50, W + 150, H + 250), W, H)
+        assert (round(b.width), round(b.height)) == (200, 300)     # size kept
+        assert round(b.x1) == round(W) and round(b.y1) == round(H)  # on the border
+        # negative origin → shift right/down, size kept
+        b2 = fit_box_keep_size(Box(-40, -10, 60, 90), W, H)
+        assert b2.x0 == 0 and b2.y0 == 0 and (round(b2.width), round(b2.height)) == (100, 100)
+
+    def test_fit_keep_size_shrinks_only_when_larger_than_page(self):
+        b = fit_box_keep_size(Box(-100, -100, W + 100, H + 100), W, H)
+        assert b.x0 == 0 and b.y0 == 0 and round(b.x1) == round(W) and round(b.y1) == round(H)
 
     def test_minimum_size_enforced(self):
         b = clamp_box(Box(300, 300, 300, 300), W, H)
@@ -193,6 +206,15 @@ class TestAutoCropRect:
         base = self._crop(self.pageA, True, True)
         moved = self._crop(self.pageA, True, True, l=8.0)
         assert moved.y1 == base.y1                                 # bottom stays put
+
+    def test_overflow_shifts_keeping_constant_size(self):
+        """#5: content near the right/bottom edge → the anchored W×H frame is SHIFTED inward
+        (opposite edge extends), never shrunk — the constant size is preserved on every page."""
+        near_corner = Box(W - 30, H - 30, W - 10, H - 10)          # base would extend off-page
+        a = self._crop(near_corner, True, True)                    # anchors ON, offsets 0
+        assert (round(a.width), round(a.height)) == (200, 400)     # size NOT shrunk
+        assert a.x0 >= 0 and a.y0 >= 0 and a.x1 <= W and a.y1 <= H  # fully on-page
+        assert round(a.x1) == round(W) and round(a.y1) == round(H)  # trailing edge on the border
 
 
 class TestRotateBoxCw:

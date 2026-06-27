@@ -55,6 +55,29 @@ def clamp_box(b: Box, w: float, h: float) -> Box:
     return Box(x0, y0, x1, y1)
 
 
+def fit_box_keep_size(b: Box, w: float, h: float) -> Box:
+    """Place `b` fully inside the page (w×h) WITHOUT changing its size: if it overhangs an edge,
+    translate it inward (the opposite edge takes up the slack). A side is shrunk to the page
+    (>= MIN_RECT) only when the box is itself larger than the page in that axis. This preserves
+    the constant W×H of the auto-crop frame on every page (§9.2) — shift, don't shrink."""
+    bw = max(MIN_RECT, min(b.width, w))
+    bh = max(MIN_RECT, min(b.height, h))
+    x0 = min(max(b.x0, 0.0), max(0.0, w - bw))
+    y0 = min(max(b.y0, 0.0), max(0.0, h - bh))
+    return Box(x0, y0, x0 + bw, y0 + bh)
+
+
+def anchored_base(page_box: Box, union: Box, anchor_left: bool, anchor_top: bool,
+                  w: float, h: float) -> Box:
+    """The constant-`union`-size crop frame placed on the page *before* offsets: anchored to this
+    page's content edge (anchor ON) or the union edge (OFF), then shifted inward to stay on-page
+    at the full W×H (§9.2). Shared by the live crop, drag round-trip and offset clamp so all three
+    agree on the same base."""
+    lb = page_box.x0 if anchor_left else union.x0
+    tb = page_box.y0 if anchor_top else union.y0
+    return fit_box_keep_size(Box(lb, tb, lb + union.width, tb + union.height), w, h)
+
+
 def resize_by_handle(box: Box, handle: str, dx: float, dy: float,
                      w: float, h: float) -> Box:
     """New box after dragging `handle` by (dx, dy). Only the handle's edges move;
@@ -131,10 +154,9 @@ def auto_crop_rect(page_box: Box, union: Box, anchor_left: bool, anchor_top: boo
     page's content edge; OFF pins it to the union (cross-page) edge. Offsets are percent
     of page width/height.
     """
-    left_base = page_box.x0 if anchor_left else union.x0
-    top_base = page_box.y0 if anchor_top else union.y0
-    left = left_base - left_off / 100.0 * w
-    top = top_base - top_off / 100.0 * h
-    right = left_base + union.width + right_off / 100.0 * w
-    bottom = top_base + union.height + bottom_off / 100.0 * h
+    base = anchored_base(page_box, union, anchor_left, anchor_top, w, h)   # shifted, never shrunk
+    left = base.x0 - left_off / 100.0 * w
+    top = base.y0 - top_off / 100.0 * h
+    right = base.x0 + union.width + right_off / 100.0 * w
+    bottom = base.y0 + union.height + bottom_off / 100.0 * h
     return clamp_box(Box(left, top, right, bottom), w, h)

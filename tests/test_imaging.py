@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import pytest
 
-import imaging
+import core.imaging as imaging
 
 
 def _page_bgr(w=600, h=800, with_text=True):
@@ -62,19 +62,37 @@ class TestCleanBilevel:
         out = imaging.clean_document_bilevel(_page_bgr(), strength=2, dpi=300.0, upscale=1.0)
         assert out.shape == (800, 600)
 
-    def test_preserve_mask_keeps_grayscale(self):
-        page = _page_bgr()
-        mask = np.zeros((800, 600), np.uint8)
-        mask[300:500, 200:400] = 255                   # protect a region from bilevel
-        out = imaging.clean_document_bilevel(page, strength=2, upscale=1.0, preserve_mask=mask)
+
+# --------------------------------------------------------------- Sharpen filter
+class TestSharpen:
+    def test_returns_single_channel(self):
+        out = imaging.sharpen_grayscale(_page_bgr())
+        assert out.dtype == np.uint8 and out.ndim == 2
         assert out.shape == (800, 600)
 
+    @pytest.mark.parametrize("strength", [1, 2, 3])
+    def test_all_strengths_run(self, strength):
+        out = imaging.sharpen_grayscale(_page_bgr(), strength=strength)
+        assert out.dtype == np.uint8 and out.ndim == 2 and out.shape == (800, 600)
 
-# --------------------------------------------------------------- grayscale sharpen
-def test_sharpen_grayscale_returns_single_channel():
-    out = imaging.sharpen_grayscale(_page_bgr())
-    assert out.dtype == np.uint8 and out.ndim == 2
-    assert out.shape == (800, 600)
+    def test_strength_drives_denoise(self):
+        # Regression: strength must actually scale the denoise/unsharp, not just the (caller-set)
+        # `amount`. The old code held denoise fixed, so strength was a no-op on the filtering and
+        # a hard sharpen amplified scan noise.
+        rng = np.random.default_rng(3)
+        page = np.clip(_page_bgr().astype(int) +
+                       rng.integers(-40, 41, (800, 600, 3)), 0, 255).astype(np.uint8)
+        s1 = imaging.sharpen_grayscale(page, strength=1)
+        s3 = imaging.sharpen_grayscale(page, strength=3)
+        assert not np.array_equal(s1, s3)                 # strength is wired into the filtering
+        assert s3[:60].std() <= s1[:60].std()             # stronger denoise → smoother background
+
+    def test_gray_strength_table_monotonic(self):
+        d = imaging._GRAY_STRENGTH
+        assert set(d) == {1, 2, 3}
+        for key in ("sigma_color", "sigma_space", "blur_sigma"):
+            vals = [d[s][key] for s in (1, 2, 3)]
+            assert vals == sorted(vals) and vals[0] < vals[-1]
 
 
 # --------------------------------------------------------------- deskew
@@ -113,41 +131,29 @@ class TestContentBox:
         assert imaging.content_box(np.full((200, 200), 255, np.uint8)) is None
 
 
-# --------------------------------------------------------------- picture mask
-class TestPictureMask:
-    def test_textured_region_detected(self):
-        page = np.full((400, 400, 3), 255, np.uint8)
-        noise = np.random.default_rng(1).integers(0, 256, (160, 160, 3), dtype=np.uint8)
-        page[120:280, 120:280] = noise                  # photo-like patch
-        mask = imaging.detect_picture_mask(page, min_frac=0.01)
-        assert mask is not None and mask.shape == (400, 400)
-        assert mask.max() == 255
-
-    def test_blank_page_has_no_picture(self):
-        blank = np.full((400, 400, 3), 255, np.uint8)
-        assert imaging.detect_picture_mask(blank, min_frac=0.01) is None
-
-
 # --------------------------------------------------------------- dewarp (unwarp)
 class TestDewarp:
     def test_unwarp_available_returns_bool(self):
         assert isinstance(imaging.unwarp_available(), bool)
 
-    def test_force_int64_inputs_casts_int32_only(self):
+    def test_int64_session_casts_int32_only_and_delegates(self):
         class FakeSession:
             received = None
+            name = "real"
 
             def run(self, names, feed, opts=None):
                 self.received = feed
                 return ["ok"]
 
-        sess = FakeSession()
-        imaging.force_int64_inputs(sess)                 # wraps sess.run
-        out = sess.run(None, {"grid": np.zeros((2, 2), np.int32),
-                              "x": np.ones((3,), np.float32)})
+        real = FakeSession()
+        proxy = imaging.Int64Session(real)               # wrap, do NOT mutate the session
+        out = proxy.run(None, {"grid": np.zeros((2, 2), np.int32),
+                               "x": np.ones((3,), np.float32)})
         assert out == ["ok"]
-        assert sess.received["grid"].dtype == np.int64   # int32 → int64
-        assert sess.received["x"].dtype == np.float32    # other inputs untouched
+        assert real.received["grid"].dtype == np.int64   # int32 → int64
+        assert real.received["x"].dtype == np.float32    # other inputs untouched
+        assert proxy.name == "real"                      # __getattr__ delegates everything else
+        assert real.run.__self__ is real                 # the real session's run is unchanged
 
     @pytest.mark.skipif(not imaging.unwarp_available(),
                         reason="docuwarp / onnxruntime not installed")

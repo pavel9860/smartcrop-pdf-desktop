@@ -27,3 +27,7 @@ Thumbs.db
 
 # Large local test assets (keep the repo light; tests skip if absent)
 tests/assets/*.pdf
+
+# Benchmark model weights / exported ONNX / outputs (large, regenerable)
+tests/bench/models/
+tests/bench/out/

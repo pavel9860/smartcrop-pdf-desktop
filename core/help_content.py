@@ -7,9 +7,10 @@ HELP_SECTIONS = [
      "labels the document Normal (born-digital vector text) or Scanned (page images). The "
      "marker beside the Document & State title shows the result; it is informational and set "
      "automatically. Scan Processing appears only for Scanned documents."),
-    ("loading", "Opening a PDF", "Use Load PDF (Ctrl+O) to choose a file. SmartCrop reads "
-     "it, classifies the mode, and shows the first page. Your work stays in memory until you "
-     "export — the original file is never modified."),
+    ("loading", "Loading & combining files", "Use Load Files (Ctrl+O) to choose one or many "
+     "files at once — any mix of PDFs and images (jpg/png/tif). They combine into one working "
+     "document in selection order: each PDF contributes its pages, each image becomes one page. "
+     "Your work stays in memory until you export — the originals are never modified."),
     ("pages", "Choosing pages", "Pick which pages an action affects: All, Odd, or Even "
      "(counted from page 1), or Selected to type an exact set such as 1,3,5-9,12 (commas and "
      "inclusive ranges). The chosen pages drive auto-detect, scan processing, crop and "
@@ -26,20 +27,26 @@ HELP_SECTIONS = [
      "box to move it. To start over, drag a new rectangle anywhere on the page — the previous "
      "crop is replaced. Clear removes the crop and resets the offsets."),
     ("scan", "Scan processing", "For Scanned documents only. Dewarp & Deskew flattens and "
-     "straightens curled or tilted pages. B/W and Grayscale are mutually exclusive cleanup "
-     "filters; Strength 1-3 sets how aggressive the active one is. Nothing is applied until "
-     "you press a button, and each run starts fresh from the original scan."),
+     "straightens curled or tilted pages. B/W (bilevel threshold) and Sharpen (flatten + "
+     "denoise + unsharp, keeps tone) are mutually exclusive filters; Strength 1-3 sets how "
+     "aggressive the active one is. Nothing is applied until you press a button, and each run "
+     "starts fresh from the original scan."),
     ("split", "Splitting pages", "Split one source page into 1, 2, or 4 output pages — handy "
      "for two-up scans. Draw or drag the rectangles in reading order (numbered ①-④); Same "
      "size keeps them identical. Split and auto-detect are mutually exclusive."),
-    ("resize", "Resizing output", "Applied last, after cropping. Keep the original size, "
-     "choose an e-reader preset, or enter a custom width × height in pixels."),
-    ("export", "Crop & export", "Apply Crop commits the crop to the chosen pages and shows "
-     "the result in the viewer. Export PDF (Ctrl+S) writes a new file, suggesting "
-     "<name>_cropped.pdf. Undo/Redo cover crop, rotate, dewarp and clean."),
+    ("compress", "Compressing output", "Compress Document resamples every output image to the "
+     "chosen DPI (Original keeps native crop pixels; High 300 / Medium 150 / Low 72 make a "
+     "leaner file), applied last after cropping. Output colours = Grayscale desaturates every "
+     "page (tone kept, no thresholding); Original colors leaves each page untouched."),
+    ("export", "Export & formats", "Apply Crop commits the crop to the chosen pages and shows "
+     "the result in the viewer. Export (Ctrl+S) writes a new file; the ▾ menu chooses the "
+     "format — PDF (one file) or JPG / PNG / TIFF (one file per output page, with an index "
+     "suffix). The name is suggested as <name>_cropped. Undo/Redo cover crop, rotate, dewarp "
+     "and filter."),
     ("shortcuts", "Keyboard shortcuts", "Ctrl+O open · Ctrl+Enter apply crop · Ctrl+S "
-     "export · Ctrl+Z undo · Ctrl+Y redo · ← / → and PgUp / PgDn change page · Ctrl+= and "
-     "Ctrl+- scale the interface · Enter in the page box jumps to it."),
+     "export · Ctrl+Z undo · Ctrl+Y redo · ← / → and PgUp / PgDn (or the mouse wheel over "
+     "the page) change page · Ctrl+= and Ctrl+- scale the interface · Enter in the page box "
+     "jumps to it."),
     ("about", "About", "SmartCrop PDF crops, straightens and cleans PDFs and scans for "
      "comfortable reading on e-readers and tablets. Interface built with CustomTkinter."),
 ]

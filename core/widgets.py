@@ -15,6 +15,10 @@ class ToolTip:
             widget.bind("<Enter>", self._enter, add="+")
             widget.bind("<Leave>", self._leave, add="+")
             widget.bind("<ButtonPress>", self._leave, add="+")
+            # Strict lifecycle: if the widget is destroyed (view rebuilt, modal closed) while a
+            # show-timer is pending or the tip is up, cancel the job and tear the tip down so no
+            # phantom callback fires on a dead widget and no orphan Toplevel leaks.
+            widget.bind("<Destroy>", self._leave, add="+")
         except (NotImplementedError, tk.TclError):
             pass   # some CTk composite widgets reject .bind; tooltip silently skipped
 
@@ -22,7 +26,10 @@ class ToolTip:
         self.job = self.w.after(450, self._show)
 
     def _show(self):
+        self.job = None
         try:
+            if not self.w.winfo_exists():            # widget gone before the timer fired
+                return
             x = self.w.winfo_rootx() + 14
             y = self.w.winfo_rooty() + self.w.winfo_height() + 6
         except tk.TclError:
@@ -42,7 +49,10 @@ class ToolTip:
 
     def _leave(self, _e=None):
         if self.job:
-            self.w.after_cancel(self.job)
+            try:
+                self.w.after_cancel(self.job)        # cancel the pending show-timer explicitly
+            except (tk.TclError, ValueError):
+                pass
             self.job = None
         if self.win:
             try:
@@ -60,13 +70,17 @@ class Spin(ctk.CTkFrame):
         self.entry = ctk.CTkEntry(self, textvariable=var, width=width, justify="center",
                                   font=app.font_offset)
         self.entry.pack(fill="x")
-        for ev in ("<MouseWheel>",):
-            self.entry.bind(ev, self._wheel)
+        self.entry.bind("<MouseWheel>", self._wheel)          # Windows / macOS
+        self.entry.bind("<Button-4>", lambda _e: self._scroll(+1))   # X11 (Linux) wheel up
+        self.entry.bind("<Button-5>", lambda _e: self._scroll(-1))   # X11 (Linux) wheel down
         self.entry.bind("<Up>", lambda _e: self._bump(self.step))
         self.entry.bind("<Down>", lambda _e: self._bump(-self.step))
 
     def _wheel(self, e):
-        self._bump(self.step if e.delta > 0 else -self.step)
+        return self._scroll(1 if e.delta > 0 else -1)         # MouseWheel sign → direction
+
+    def _scroll(self, direction: int):
+        self._bump(self.step * direction)
         return "break"
 
     def _bump(self, d):
