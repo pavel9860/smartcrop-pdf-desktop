@@ -8,14 +8,17 @@ inside `unwarp_bgr`; absence degrades gracefully.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 import cv2
 import numpy as np
+import numpy.typing as npt
+
+NDArr = npt.NDArray[Any]   # numpy/cv2 are dynamically typed; one alias keeps annotations honest
 
 
-def _sauvola_threshold(image: np.ndarray, window_size: int, k: float,
-                       r: float = 127.5) -> np.ndarray:
+def _sauvola_threshold(image: NDArr, window_size: int, k: float,
+                       r: float = 127.5) -> NDArr:
     """Per-pixel Sauvola threshold T = m·(1 + k·(s/R − 1)), where m and s are the
     local mean and standard deviation over a `window_size`² window and R = `r` is
     the assumed dynamic range of s (127.5 for 8-bit). Computed with cv2 box filters
@@ -29,7 +32,7 @@ def _sauvola_threshold(image: np.ndarray, window_size: int, k: float,
     sq_mean = cv2.boxFilter(img * img, ddepth=-1, ksize=win, normalize=True,
                             borderType=cv2.BORDER_REFLECT_101)
     std = np.sqrt(np.clip(sq_mean - mean * mean, 0.0, None))
-    return mean * (1.0 + k * ((std / r) - 1.0))
+    return cast(NDArr, mean * (1.0 + k * ((std / r) - 1.0)))
 
 # Discrete B/W (bilevel) strength → (sauvola_k, min_component_area_at_upscale1). Lower k =
 # thicker strokes; higher min_area = more despeckle. Deliberately 3 levels (continuous = false
@@ -61,15 +64,16 @@ class Int64Session:
     less brittle if onnxruntime/docuwarp change their internals.
     """
 
-    def __init__(self, session):
+    def __init__(self, session: Any) -> None:
         self._session = session
 
-    def run(self, output_names, input_feed, run_options=None):
+    def run(self, output_names: Any, input_feed: dict[str, Any],
+            run_options: Any = None) -> Any:
         fixed = {k: (v.astype(np.int64) if isinstance(v, np.ndarray) and v.dtype == np.int32 else v)
                  for k, v in input_feed.items()}
         return self._session.run(output_names, fixed, run_options)
 
-    def __getattr__(self, name):                     # delegate everything else to the real session
+    def __getattr__(self, name: str) -> Any:         # delegate everything else to the real session
         return getattr(self._session, name)
 
 
@@ -84,14 +88,14 @@ def _dpi_scale(dpi: Optional[float]) -> float:
 
 # -------------------------------------------------------------------------- clean
 def clean_document_bilevel(
-    img_bgr: np.ndarray,
+    img_bgr: NDArr,
     *,
     strength: int = 2,
     dpi: Optional[float] = None,
     sauvola_window: int = 51,
     bg_kernel: int = 51,
     upscale: float = 2.0,
-) -> np.ndarray:
+) -> NDArr:
     """B/W bilevel filter: ink=0 / background=255 (uint8, single channel).
 
     `strength` selects (k, min_component_area). `dpi`, if given, scales the
@@ -137,7 +141,7 @@ def clean_document_bilevel(
 
 
 # ------------------------------------------------------------------------ deskew
-def estimate_skew(gray: np.ndarray, *, max_deg: float = 15.0) -> float:
+def estimate_skew(gray: NDArr, *, max_deg: float = 15.0) -> float:
     """Correction angle (degrees) to pass straight to `deskew`. Sign convention is
     composed so `deskew(g, estimate_skew(g))` straightens the page (validated:
     +7.0 in → -7.01 correction). Clamped to ±max_deg."""
@@ -156,23 +160,24 @@ def estimate_skew(gray: np.ndarray, *, max_deg: float = 15.0) -> float:
     return float(np.clip(ang, -max_deg, max_deg))
 
 
-def deskew(img: np.ndarray, angle: float, *, border: int = 255) -> np.ndarray:
+def deskew(img: NDArr, angle: float, *, border: int = 255) -> NDArr:
     if abs(angle) < 0.05:
         return img
     h, w = img.shape[:2]
     m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
-    return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC,
-                          borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+    out: NDArr = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC,  # type: ignore[call-overload]
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+    return out
 
 
-def deskew_auto(img: np.ndarray) -> Tuple[np.ndarray, float]:
+def deskew_auto(img: NDArr) -> Tuple[NDArr, float]:
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     ang = estimate_skew(g)
     return deskew(img, ang), ang
 
 
 # ------------------------------------------------------------------- content box
-def content_box(bilevel: np.ndarray, *, border_frac: float = 0.02,
+def content_box(bilevel: NDArr, *, border_frac: float = 0.02,
                 min_comp_frac: float = 2.5e-4) -> Optional[Tuple[int, int, int, int]]:
     """Tight (x0, y0, x1, y1) over the *text* region of a bilevel page (ink<128).
 
@@ -211,13 +216,13 @@ def content_box(bilevel: np.ndarray, *, border_frac: float = 0.02,
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
-def sharpen_grayscale(img_bgr: np.ndarray, *, strength: int = 2, amount: float = 1.1,
-                      bg_kernel: int = 51, denoise: bool = True) -> np.ndarray:
+def sharpen_grayscale(img_bgr: NDArr, *, strength: int = 2, amount: float = 1.1,
+                      bg_kernel: int = 51, denoise: bool = True) -> NDArr:
     """Sharpen filter: keep continuous-tone grayscale but flatten illumination, denoise and
     unsharp-mask. `strength` (1/2/3) scales the bilateral denoise and unsharp radius via
     `_GRAY_STRENGTH`, while `amount` (CLEAN_AMOUNT, §18) sets the unsharp gain — so a higher
     setting denoises *more* before sharpening *harder*, instead of sharpening harder over the
-    same noise. For scans where bilevel would destroy photos/anti-aliasing. uint8, single channel."""
+    same noise. For scans where bilevel would destroy photos/anti-aliasing. uint8, 1 channel."""
     cfg = _GRAY_STRENGTH[int(strength)]
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
     se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (bg_kernel | 1, bg_kernel | 1))
@@ -225,14 +230,15 @@ def sharpen_grayscale(img_bgr: np.ndarray, *, strength: int = 2, amount: float =
     flat = np.clip(cv2.divide(gray.astype(np.float32), bg.astype(np.float32) + 1e-6) * 255.0,
                    0, 255).astype(np.uint8)
     if denoise:
-        flat = cv2.bilateralFilter(flat, cfg["d"], cfg["sigma_color"], cfg["sigma_space"])
+        flat = cv2.bilateralFilter(  # type: ignore[call-overload]
+            flat, cfg["d"], cfg["sigma_color"], cfg["sigma_space"])
     blur = cv2.GaussianBlur(flat, (0, 0), cfg["blur_sigma"])
     sharp = cv2.addWeighted(flat, 1.0 + amount, blur, -amount, 0)
     return np.clip(sharp, 0, 255).astype(np.uint8)
 
 
 # ------------------------------------------------------------------------ unwarp
-_UNWARP_CACHE: dict = {}
+_UNWARP_CACHE: dict[str, Any] = {}
 
 
 def unwarp_available() -> bool:
@@ -243,7 +249,7 @@ def unwarp_available() -> bool:
         return False
 
 
-def unwarp_bgr(bgr: np.ndarray, *, providers=("CPUExecutionProvider",)) -> np.ndarray:
+def unwarp_bgr(bgr: NDArr, *, providers: Tuple[str, ...] = ("CPUExecutionProvider",)) -> NDArr:
     """Learned mesh dewarp (page curl/fold) + incidental deskew. In/out BGR uint8.
     Model is cached process-wide. Raises RuntimeError if docuwarp is not installed —
     callers surface that to the user rather than crashing.

@@ -69,43 +69,63 @@ also exists and must never be installed — it shadows PyMuPDF.
 ## 3\. Architecture \& modules
 
 Pure, Tk-free logic is separated from UI for testability. **Everything runs on the main thread;**
-long jobs are processed one page per Tk tick (§14), so the UI stays responsive without the
-complexity — or all-pages-resident memory cost — of a worker pool.
+long jobs are processed one page per Tk tick (§14) as cooperative batch jobs, so the UI stays
+responsive without the complexity — or all-pages-resident memory cost — of a worker pool.
 
-The application is one class, **`SmartCropApp`**, whose behaviour is composed from focused mixin
-modules (no mega-class; each file stays modest). Pure logic is unit-tested; the UI is
-integration-tested through a headless `SmartCropApp`.
+The app is **two layers with one direction of dependency**. A **Tk-free domain layer** (`core/`)
+owns all state and logic behind a single facade, **`AppModel`**; a **UI layer** (`ui/`) builds the
+CustomTkinter widgets and the page canvas, calls only `AppModel`'s public methods, and reads only
+the frozen value objects they return. `ui/` imports `core.*`; **`core/` never imports `ui`,
+`tkinter` or `customtkinter`** — a violation is a build failure. The deeper design (state
+ownership, the `AppModel` interface, the batch/threading model, the error taxonomy) lives in
+`ARCHITECTURE.md`; this section is the module map and the rules that bind it.
 
 ```
-main.py            the ONLY entry point  (python main.py -> core.app.main)
-core/              application package
-  app.py           SmartCropApp: construction, shared state, keyboard/scaling, undo/redo, main()
-  ui\_build.py      UIBuildMixin   - widgets, Settings/Help windows, progress overlay      (mixin)
-  document.py      DocumentMixin  - multi-file open (PDFs+images), classify/reset, sizing, rasters
-  detect.py        DetectMixin    - auto-detect, crop geometry, offsets, 1/2/4-up split
-  canvas.py        CanvasMixin    - page render, crop overlay, mouse drag, page navigation
-  export.py        ExportMixin    - dewarp/filter, pages/compress, apply, export (PDF/JPG/PNG/TIFF), rotate
-  widgets.py       ToolTip, Spin (offset stepper)
-  theme.py         colour palette (warm-gray chrome + blue accent)
-  help\_content.py  help sections + tooltip text
-  geometry.py      Box, crop-rect math, drag/resize/move, union\_box, auto\_crop\_rect   (pure,
-  render.py        crop / compress (DPI) / remove-colours / encode - the ONE image path (preview+export) Tk-free)
-  viewmodel.py     output-page navigation math (committed splits expand to N views)
-  lru.py           LRUCache - page-keyed raster cache bound (flat memory)
-  enums.py         Mode / FilterMode / PagesMode (str-backed Enums)
-  imaging.py       cv2/numpy primitives (Sauvola filter, deskew, content\_box, dewarp, Sharpen)
-  parsing.py       page-selection parsing (all/odd/even/ranges/slices)
-  constants.py     tunables + theme maps + DPI compression presets + export formats (§18)
-tests/             unit + integration (see Test Specification); tests/bench/ = scratch benchmarks
-docs/              this specification + goals + test spec
-old/               previous versions (legacy ttk)
+main.py             the ONLY entry point  (python main.py -> ui.app\_window.main)
+core/               Tk-free domain layer — no tkinter / customtkinter / ui import, ever
+  model.py          AppModel: the single facade — owns state, exposes commands + queries
+  document\_state.py DocumentState (the undoable state) + Offsets + PageProcessIntent; snapshot()
+  settings.py       Settings — live output/behaviour values a domain command reads (outside history)
+  history.py        History — bounded undo/redo of DocumentState snapshots
+  drag.py           DragState tagged union (Auto/Split/Draw/CropEdit) — transient gesture state
+  batch.py          BatchJob protocol + BatchResult (Ok/Cancelled/Failed) + Detect/Scan/Export jobs
+  errors.py         SmartCropError taxonomy — raised in core, caught only in ui
+  geometry.py       Box, crop-rect math, drag/resize/move, union\_box, auto\_crop\_rect   (pure leaf)
+  render.py         crop / compress (DPI) / remove-colours / encode — the ONE image path (preview+export)
+  viewmodel.py      output-page navigation math (committed splits expand to N views)
+  imaging.py        cv2/numpy primitives (Sauvola filter, deskew, content\_box, dewarp, Sharpen)
+  parsing.py        page-selection parsing (all/odd/even/ranges/slices)
+  enums.py          Mode / FilterMode / PagesMode (str-backed Enums)
+  lru.py            LRUCache — page-keyed raster cache bound (flat memory)
+  constants.py      domain tunables + DPI compression presets + export formats (§18)
+ui/                 presentation layer — imports core.*; core never imports ui
+  app\_window.py     AppWindow: root window, owns one AppModel, dispatch()/dispatch\_job() (the only
+                    error catch sites), drives BatchJobs via root.after, scaling, shortcuts, main()
+  canvas\_view.py    page canvas: paints from AppModel.view\_snapshot(); translates mouse events to
+                    page-unit coords -> model.begin\_drag/update\_drag/end\_drag/cancel\_drag
+  overlay.py        progress overlay driven by a BatchJob handle
+  panels/           crop / pages / output control cards
+  settings\_window.py help\_window.py widgets.py theme.py help\_content.py   (Settings/Help, ToolTip/Spin, palette)
+  config.py         UIConfig — presentation-only state (theme / font / scale / dialog toggles)
+  constants.py      UI tunables (handle sizes, window/panel geometry, throttles)
+tests/              core/ unit tests (no Tk) + ui/ wiring tests + test\_architecture.py import guard
+docs/               this specification + goals + test spec
 ```
 
-**Dependency rule:** `core.app` mixes in the five UI/behaviour mixins; they and the mixins build on
-the pure modules. **No upward imports** — no mixin or pure module imports `app`; mixins reach
-across only through `self`. Tunables live in `constants.py` (§18); a small number of fixed canvas /
-dialog point sizes are still inline. All PyMuPDF and Tk work is on the main thread. Unhandled
-Tk-callback exceptions are caught by a global handler and surfaced in a dialog (§20).
+**Dependency rule.** One direction only: `ui/` → `core/` → pure leaves; **no upward imports**.
+`core/` is mechanically forbidden from importing `tkinter`, `customtkinter` or `ui` (asserted by
+`tests/test_architecture.py`), which is what makes the whole domain layer unit-testable headless.
+Tunables live in `constants.py` (§18), split into a domain set in `core/` and a presentation set
+in `ui/`; a few fixed canvas / dialog point sizes are still inline.
+
+**State, threading, errors.** `AppModel` is the single state owner. `DocumentState` holds exactly
+the **undoable** fields, snapshot-copied into `History` (§13); live output/behaviour `Settings`
+(compress DPI, colours, format, folder, postfix, undo depth, dewarp supersample) and presentation
+`UIConfig` sit **outside** history, so they survive Undo (§22). All PyMuPDF and Tk work is on the
+main thread; a long operation is a `BatchJob` the window steps one page per `after` tick (§14).
+`core/` raises typed `SmartCropError`s for every expected failure (§20) and never opens a dialog —
+`ui/`'s `dispatch()` is the one place they are caught and shown. Unhandled Tk-callback exceptions
+go to a global handler that restores a usable state and surfaces a dialog (§20).
 
 \---
 
@@ -208,7 +228,7 @@ Crop follows its configuration. The pinned bottom card holds **Settings/Help**, 
 Reset**, then the page nav.
 
 ```
-+--------------------------------+----------------------------------------------+
++SmartCrtopPDF----Name of the opened file-+----------------------------------------------+
 | \[ Document \& State --\[ NORMAL ]|                                              |  badge on the title line
 |  \[ (\*)Load PDF/Image Files   ] |              page bitmap                     |  (PDFs and/or images)
 | ]------------------------------|   crop frame: corners resize, borders move,   |
@@ -221,7 +241,7 @@ Reset**, then the page nav.
 |  \[ Filter ------------------- ]|        |  ####### . . . 124 / 312 |          |  overlay shows
 |  | \[   B/W   ] \[ Sharpen   ] ||        |          \[ Cancel ]      |          |  only while busy
 |  | Strength                    ||        +--------------------------+          |  (§14)
-|  | \[ 1 ] \[ 2 ] \[ 3 ]        ||                                              |
+|  | \[ 1 ] \[ 2 ] \[ 3 ]        ||   3 button same width for whole tab         |
 |  ]--------------------------- ]|                                              |
 | ]------------------------------|                                              |
 | \[ Split Each Page Into --------|                                              |
@@ -737,7 +757,11 @@ Compress DPI (§12.6), and streams page-by-page under the overlay (§14).
 snapshot is taken before every mutating op — crop (the `applied` map), draw, rotate, **and
 dewarp/filter** — so Undo reverts all of them. The snapshot captures `applied`, split rects,
 `rotation`, processed flags, detection/union, offsets and the filter/dewarp intent (not the
-rasters); restore clears the raster caches so they re-render.
+rasters); restore clears the raster caches so they re-render. Detection (`detect_cache`) and the
+union frame are **undoable** state, so Undo reverts the live auto-crop frame to its earlier setup;
+because Auto-detect itself takes **no** snapshot, undoing to a snapshot taken *before* a later
+Auto-detect also discards that detect's result — the intended trade that keeps the crop setup
+internally consistent across Undo (ARCHITECTURE.md §5.1).
 * **Reset** — resets the **whole document** to its just-opened state: **re-loads the same input
 files** and re-combines them (§7.1a) — or reloads the synthetic demo — clearing all crops,
 rotations, detection, processing and history. It

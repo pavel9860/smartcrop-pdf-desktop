@@ -6,7 +6,7 @@ names; dragging it moves only the edges it owns (so the opposite edge never move
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 MIN_RECT = 5.0
 
@@ -15,17 +15,12 @@ HANDLE_EDGES: Dict[str, Tuple[str, ...]] = {
     "NW": ("x0", "y0"), "N": ("y0",), "NE": ("x1", "y0"), "E": ("x1",),
     "SE": ("x1", "y1"), "S": ("y1",), "SW": ("x0", "y1"), "W": ("x0",),
 }
-HANDLE_CURSOR: Dict[str, str] = {
-    "NW": "size_nw_se", "SE": "size_nw_se", "NE": "size_ne_sw", "SW": "size_ne_sw",
-    "N": "sb_v_double_arrow", "S": "sb_v_double_arrow",
-    "E": "sb_h_double_arrow", "W": "sb_h_double_arrow",
-}
 
 
 class Box:
     __slots__ = ("x0", "y0", "x1", "y1")
 
-    def __init__(self, x0, y0, x1, y1):
+    def __init__(self, x0: float, y0: float, x1: float, y1: float) -> None:
         self.x0, self.y0, self.x1, self.y1 = float(x0), float(y0), float(x1), float(y1)
 
     @property
@@ -39,7 +34,7 @@ class Box:
     def as_tuple(self) -> Tuple[float, float, float, float]:
         return (self.x0, self.y0, self.x1, self.y1)
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, Box) and self.as_tuple() == other.as_tuple()
 
     def __repr__(self) -> str:
@@ -125,7 +120,7 @@ def point_in_box(box: Box, x: float, y: float) -> bool:
 
 
 # --------------------------------------------------------------- auto-detect frame
-def union_box(boxes) -> Box:
+def union_box(boxes: Iterable[Box]) -> Box:
     """Constant crop frame for a set of per-page content boxes.
 
     Size is the *largest* content width and height seen across pages — W = max(right-left),

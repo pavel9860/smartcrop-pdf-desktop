@@ -2,10 +2,11 @@
 These guarantee WYSIWYG: the preview path and the export path call the same function."""
 from __future__ import annotations
 
+import pytest
 from PIL import Image
 
 from core.geometry import Box
-from core.render import crop_to_box, resize_to, output_image, fit_scale, desaturate
+from core.render import crop_to_box, desaturate, fit_scale, output_image, resize_to
 
 
 def _img(w, h):
@@ -67,9 +68,6 @@ def test_output_image_grayscale_applied_last():
 def test_fit_scale_picks_limiting_dimension():
     # tall content in a wide canvas → height is limiting
     assert fit_scale(100, 1000, 800, 600, 40) == (600 - 40) / 1000
-
-
-import pytest
 
 
 @pytest.mark.parametrize("pw,ph", [(100, 1000), (1000, 100), (800, 600), (612, 792), (2480, 1860)])

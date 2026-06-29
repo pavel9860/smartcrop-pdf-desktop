@@ -1,7 +1,7 @@
 """Tests for core.enums — formalised states that still compare like their old strings."""
 from __future__ import annotations
 
-from core.enums import Mode, FilterMode, PagesMode
+from core.enums import FilterMode, Mode, PagesMode
 from core.parsing import pages_for_mode
 
 

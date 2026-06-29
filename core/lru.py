@@ -8,27 +8,28 @@ so the rest of the code (`get`/`[]=`/`in`/`pop`/`clear`/`items`/`values`) is unc
 from __future__ import annotations
 
 from collections import OrderedDict
+from typing import Any
 
 
-class LRUCache(OrderedDict):
+class LRUCache(OrderedDict[Any, Any]):
     """An OrderedDict capped at `maxsize` entries; least-recently-used is evicted on insert.
     Reads (`[]`/`get`) and writes refresh recency. `maxsize <= 0` means unbounded."""
 
-    def __init__(self, maxsize: int):
+    def __init__(self, maxsize: int) -> None:
         super().__init__()
         self.maxsize = maxsize
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: Any) -> Any:
         self.move_to_end(key)
         return super().__getitem__(key)
 
-    def get(self, key, default=None):
+    def get(self, key: Any, default: Any = None) -> Any:
         if key in self:
             self.move_to_end(key)
             return super().__getitem__(key)
         return default
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: Any, value: Any) -> None:
         if key in self:
             self.move_to_end(key)
         super().__setitem__(key, value)

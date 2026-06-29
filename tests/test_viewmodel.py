@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from core.geometry import Box
-from core.viewmodel import page_box_count, view_total, view_position, flat_to_page_box
+from core.viewmodel import flat_to_page_box, page_box_count, view_position, view_total
 
 
 def _b():

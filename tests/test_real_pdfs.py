@@ -7,12 +7,11 @@ only ever opened + a couple of pages touched — never the full render.
 """
 from __future__ import annotations
 
+import fitz
 import numpy as np
 import pytest
-
-import fitz
-
 from helpers import ASSETS, render_page_bgr
+
 import core.imaging as imaging
 
 BOOK = ASSETS / "test_pdf_native.pdf"
@@ -46,7 +45,8 @@ class TestNormalBook:
             page = doc[0]
             blocks = [b for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()]
             assert blocks                                   # real vector text present
-            x0 = min(b[0] for b in blocks); x1 = max(b[2] for b in blocks)
+            x0 = min(b[0] for b in blocks)
+            x1 = max(b[2] for b in blocks)
             assert 0 <= x0 < x1 <= page.rect.width + 1
 
 

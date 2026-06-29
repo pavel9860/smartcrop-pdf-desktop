@@ -7,6 +7,18 @@ from __future__ import annotations
 from typing import List, Optional, Set
 
 
+def _single_token_indices(raw: str, total: int) -> List[int]:
+    """A bare (colon-free) token: '' means the whole range; negative counts from the
+    end; out-of-range silently yields nothing."""
+    raw = raw.strip()
+    if raw == "":
+        return list(range(total))
+    v = int(raw)
+    if v < 0:
+        v = total + v
+    return [v] if 0 <= v < total else []
+
+
 def parse_page_expr(expr: str, total: int) -> List[int]:
     """Mixed page expression → sorted 0-based indices.
     Python-native start:stop:step plus comma-separated mix. Negative = from end.
@@ -27,15 +39,7 @@ def parse_page_expr(expr: str, total: int) -> List[int]:
         parts = tok.split(":")
         n = len(parts)
         if n == 1:
-            raw = parts[0].strip()
-            if raw == "":
-                result.update(range(total))
-            else:
-                v = int(raw)
-                if v < 0:
-                    v = total + v
-                if 0 <= v < total:
-                    result.add(v)
+            result.update(_single_token_indices(parts[0], total))
         elif n == 2:
             result.update(range(total)[slice(_pi(parts[0]), _pi(parts[1]))])
         elif n == 3:
@@ -97,7 +101,7 @@ def parse_selection(expr: str, total: int) -> List[int]:
             lo, hi = int(a), int(b)
             if lo > hi:
                 lo, hi = hi, lo
-            pages = range(lo, hi + 1)
+            pages = list(range(lo, hi + 1))
         else:
             pages = [int(tok)]
         for p in pages:

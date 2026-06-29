@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import pytest
 
-from core.geometry import (MIN_RECT, Box, auto_crop_rect, clamp_box, fit_box_keep_size,
-                                handle_positions, hit_handle, move_box, point_in_box,
-                                resize_by_handle, rotate_box_cw, union_box)
+from core.geometry import (
+    MIN_RECT,
+    Box,
+    auto_crop_rect,
+    clamp_box,
+    fit_box_keep_size,
+    handle_positions,
+    hit_handle,
+    move_box,
+    point_in_box,
+    resize_by_handle,
+    rotate_box_cw,
+    union_box,
+)
 
 W, H = 595.0, 842.0                                   # an A4-ish page
 
@@ -169,7 +180,7 @@ class TestAutoCropRect:
         self.pageA = Box(50, 60, 240, 450)        # page A content
         self.pageB = Box(80, 90, 300, 500)        # page B content (different position/size)
 
-    def _crop(self, page, al, at, l=0.0, t=0.0, r=0.0, b=0.0):
+    def _crop(self, page, al, at, l=0.0, t=0.0, r=0.0, b=0.0):  # noqa: E741 (mirrors spec edge names)
         return auto_crop_rect(page, self.union, al, at, l, t, r, b, W, H)
 
     def test_constant_size_across_pages(self):

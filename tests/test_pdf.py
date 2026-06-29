@@ -3,10 +3,10 @@ pipeline (deskew → bilevel → content box) on a rendered raster page."""
 from __future__ import annotations
 
 import fitz
-
 from helpers import make_sample_pdf, render_page_bgr
+
 import core.imaging as imaging
-from core.document import DocumentMixin
+from core.model import AppModel
 
 MODE_TEXT_MIN = 8
 
@@ -42,9 +42,11 @@ def test_scanned_pages_classified_scanned(sample_doc):
 def test_combine_pdf_and_images_builds_one_document(tmp_path):
     from PIL import Image
     pdf = make_sample_pdf(tmp_path / "doc.pdf", normal_pages=2, scanned_pages=0)
-    png = tmp_path / "p.png"; Image.new("RGB", (200, 320), "white").save(png)
-    jpg = tmp_path / "q.jpg"; Image.new("RGB", (150, 400), "white").save(jpg)
-    combined = DocumentMixin._combine_files([str(pdf), str(png), str(jpg)])
+    png = tmp_path / "p.png"
+    Image.new("RGB", (200, 320), "white").save(png)
+    jpg = tmp_path / "q.jpg"
+    Image.new("RGB", (150, 400), "white").save(jpg)
+    combined = AppModel._combine_files([str(pdf), str(png), str(jpg)])
     try:
         assert combined.page_count == 4                 # 2 PDF pages then 1 page per image
         assert combined[0].get_text().strip()           # PDF pages first (carry text)

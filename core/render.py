@@ -32,7 +32,7 @@ def resize_to(img: Image.Image, target: Optional[Tuple[float, float]]) -> Image.
     tw, th = max(1, round(target[0])), max(1, round(target[1]))
     if (tw, th) == (img.width, img.height):
         return img
-    return img.resize((tw, th), Image.LANCZOS)
+    return img.resize((tw, th), Image.Resampling.LANCZOS)
 
 
 def desaturate(img: Image.Image) -> Image.Image:

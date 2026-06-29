@@ -1,0 +1,23 @@
+CLEANUP 0 — model.py: remove pure-delegation properties.
+Delete properties compress_preset / output_colours / export_format (UI reads model.settings directly).
+Delete properties auto_active / offsets / dewarp_on / filter_mode / filter_strength (UI reads model.document directly).
+Collapse view_total / view_position public properties into the private _view_total/_view_position
+bodies directly (remove the extra indirection layer).
+Update all callers. Run gate after.
+
+
+CLEANUP 4 — tests: fix the 6 issues before writing test_app.py.
+- Move _committed/_box/_overlay helpers to conftest.py (single definition).
+- Replace the 4 private-attribute assertions with public-interface equivalents.
+- Replace m.compress_preset/m.output_colours/m.filter_mode with m.settings.*/m.document.* 
+  throughout the test files (prep for CLEANUP 0).
+- Fix run_job fixture: parameter type is BatchJob, not object.
+- Add: test_export_bad_path_becomes_imaging_error (OSError → ImagingError → Failed).
+
+
+CLEANUP 5 — fix the 6 issues in the pure module tests:
+- helpers.py: Image.BICUBIC → Image.Resampling.BICUBIC
+- test_geometry.py: remove False if False else True
+- test_pdf.py: remove _combine_files private call; add numpy top-level import
+- test_real_pdfs.py: guard page index against short PDFs
+- test_property.py: extend parse_selection hypothesis to cover slice/range tokens

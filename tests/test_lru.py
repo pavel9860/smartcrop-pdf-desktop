@@ -36,7 +36,8 @@ def test_dict_api_still_works():
     c[5] = "a"
     assert 5 in c and c.get(9) is None
     assert c.pop(5) == "a" and 5 not in c
-    c[1] = "x"; c.clear()
+    c[1] = "x"
+    c.clear()
     assert len(c) == 0
 
 

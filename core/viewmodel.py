@@ -6,9 +6,10 @@ viewer pages through, so the preview count matches the exported file (see [[rend
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Mapping, Sequence, Tuple
 
-Applied = Dict[int, List]
+# Covariant view: any per-page map of box-sequences (e.g. dict[int, list[Box]]) is accepted.
+Applied = Mapping[int, Sequence[Any]]
 
 
 def page_box_count(applied: Applied, i: int) -> int:

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import fitz
 import pytest
-
 from helpers import ASSETS, make_sample_pdf
 
 

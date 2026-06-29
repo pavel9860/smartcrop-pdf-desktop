@@ -1,6 +1,11 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+# ── project ───────────────────────────────────────────────────────────────────
 [project]
 name = "smartcropdf"
-version = "0.9.0"
+version = "0.9.1"
 description = "Crop, straighten and clean PDFs and scans for comfortable e-reader reading."
 requires-python = ">=3.12"
 dependencies = [
@@ -13,7 +18,50 @@ dependencies = [
 
 [project.optional-dependencies]
 dewarp = ["docuwarp", "onnxruntime>=1.18"]
-test = ["pytest>=8.0"]
+test   = ["pytest>=8.0", "pytest-cov>=5.0", "hypothesis>=6.0", "mypy>=1.10", "ruff>=0.5"]
 
+[project.scripts]
+smartcropdf = "main:main"
+
+# ── pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts   = "-q"
+
+# ── coverage ──────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+branch = true
+source = ["core", "ui"]          # add "ui" is a no-op until Step 4 creates it
+
+[tool.coverage.report]
+fail_under   = 80
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
+
+# ── mypy ──────────────────────────────────────────────────────────────────────
+# strict; zero relaxations on our own code — only untyped third-party libs
+# get ignore_missing_imports.
+[tool.mypy]
+python_version       = "3.12"
+strict               = true
+explicit_package_bases = true
+namespace_packages   = true
+files                = ["core", "ui"]
+
+[[tool.mypy.overrides]]
+module = ["cv2.*", "fitz.*", "docuwarp.*", "onnxruntime.*", "customtkinter.*"]
+ignore_missing_imports = true
+
+# ── ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length     = 100
+target-version  = "py312"
+extend-exclude  = ["old", "tests/bench", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "C901"]   # E/W=pycodestyle, F=pyflakes, I=isort, C901=complexity
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F811"]     # re-definition of fixtures across conftest files is intentional
