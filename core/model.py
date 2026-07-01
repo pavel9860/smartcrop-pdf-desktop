@@ -455,8 +455,8 @@ class AppModel:
         if n == 2:
             self.document.crop_rects = [Box(0, 0, w / 2, h), Box(w / 2, 0, w, h)]
         elif n == 4:
-            self.document.crop_rects = [Box(0, 0, w / 2, h / 2), Box(w / 2, 0, w, h / 2),
-                                        Box(0, h / 2, w / 2, h), Box(w / 2, h / 2, w, h)]
+            self.document.crop_rects = [Box(0, 0, w / 2, h / 2), Box(0, h / 2, w / 2, h),
+                                        Box(w / 2, 0, w, h / 2), Box(w / 2, h / 2, w, h)]
         else:
             raise ValueError(f"split_count must be 2 or 4, got {n}")
 
@@ -1047,6 +1047,33 @@ class AppModel:
     @property
     def export_format(self) -> str:
         return self.settings.export_format
+
+    @property
+    def default_ratio(self) -> float | None:
+        """Current page W/H — pre-populates the ratio field before auto-detect runs (§7.4)."""
+        if not self.page_count():
+            return None
+        w, h = self._page_dims(self.current_page)
+        return w / h if h else None
+
+    @property
+    def selection_dewarp_on(self) -> bool:
+        """True iff every page in the current selection has dewarp applied (§10)."""
+        indices = self.resolve_pages()
+        return bool(indices) and all(
+            self.document.processed.get(i, PageProcessIntent()).dewarp for i in indices)
+
+    @property
+    def selection_filter(self) -> tuple[FilterMode, int] | None:
+        """The (mode, strength) if every selected page shares the same filter, else None."""
+        indices = self.resolve_pages()
+        if not indices:
+            return None
+        filters: set[tuple[FilterMode, int] | None] = {
+            self.document.processed.get(i, PageProcessIntent()).filter for i in indices}
+        if len(filters) == 1:
+            return next(iter(filters))
+        return None
 
     @property
     def can_undo(self) -> bool:

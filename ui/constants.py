@@ -4,7 +4,7 @@ core is Tk-free, ARCHITECTURE §2/§5.2). Mirror the spec exactly; no magic numb
 from __future__ import annotations
 
 # ── crop handle hit-test / drawing (page-unit tol = (HANDLE_R + HANDLE_SLACK) / scale) ───────
-HANDLE_R = 8
+HANDLE_R = 6
 HANDLE_SLACK = 6
 CANVAS_MARGIN = 40
 
@@ -19,7 +19,7 @@ HANDLE_CURSOR: dict[str, str] = {
 WINDOW_SIZE = "1560x1000"
 WINDOW_MIN = (1040, 700)
 PANEL_WIDTH = 320
-SETTINGS_MIN_W = 620
+SETTINGS_MIN_W = 520
 
 # ── timings ────────────────────────────────────────────────────────────────────────────────────
 STATUS_IDLE_MS = 2400
@@ -31,6 +31,14 @@ UI_SCALE_MAX = 2.0
 FONT_SIZE_MIN = 10
 FONT_SIZE_MAX = 24
 DEFAULT_FONT_SIZE = 15
+
+# ── split badge: numbered circle marking output order, top-left corner of each split window
+# (spec §9.6). A fixed point size like the other canvas marks (§19) — does not track
+# DEFAULT_FONT_SIZE's live Settings override, only its default value.
+SPLIT_BADGE_FONT_SIZE = round(DEFAULT_FONT_SIZE * 1.3)     # 30% bigger than the base UI font
+SPLIT_BADGE_R = round(SPLIT_BADGE_FONT_SIZE * 0.8)         # circle radius, fits a 1-2 digit number
+SPLIT_BADGE_MARGIN = 4                                      # gap from the window corner to the circle
+CANVAS_STATUS_FONT_SIZE = DEFAULT_FONT_SIZE                 # status text drawn directly on canvas
 
 # ── palette: warm-gray chrome + a clear blue accent (§19) ───────────────────────────────────
 # CustomTkinter colour params take a (light, dark) tuple and pick by appearance mode; a single

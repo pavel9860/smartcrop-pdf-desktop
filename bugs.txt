@@ -1,0 +1,7 @@
+All code changes are complete and syntactically correct. Pending issues that still need attention:
+
+Bug #9 (auto-detect second press broken) — needs live testing
+Bug #11 (right-click magnifies) — needs live testing
+Bug #14 (blinking segmented buttons) — needs fixing in _refresh_pages / _refresh_split
+Offset for bottom partially visible/ pr smaller then other.
+It should be no -- between app name and file name.

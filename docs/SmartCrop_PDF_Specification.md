@@ -270,8 +270,9 @@ Reset**, then the page nav.
 | \[ pinned, outside the scroll --|                                              |
 | \[ (\*) Settings ] \[ (\*)Help   ] |                                              |
 | \[ ↩ Undo ]\[ ↪ Redo ]\[ ⟲ Reset]|                                             |  3 equal buttons (§7.8)
-| \[ < ]  \[ 3 ] / 312  \[ > ]     | x 34.2% y 12.7% \[] 41.0 x 58.3 % page 3 / 312 |(bottom-right) status strip
+| \[ < ]  \[ 3 ] / 312  \[ > ]     | x 34.2% y 12.7%  page 3 / 312     status text
 + -------------------------------+----------------------------------------------+
+|                                 | drawn on page image at top-left                |
 ```
 
 
@@ -325,7 +326,7 @@ reflect the combined document.
 |**Dewarp \& Deskew** (toggle, highlights when on)|Set the dewarp intent over the Pages selection; always recomputed from the immutable source, so it is idempotent (§10).|
 |**Filter** block (bordered; section-styled title)|Groups the filter controls.|
 |**B/W** / **Sharpen** (mutually exclusive, highlight the active one)|Set the filter mode over the Pages selection; pressing the active one turns it off.|
-|**Strength 1 / 2 / 3**|Three levels for whichever filter mode is active.|
+|**Strength 1 / 2 / 3**|Three levels; always selectable, whether or not a filter mode is currently active. The chosen strength applies when a filter mode is turned on.|
 
 Nothing here runs automatically — only on a button press.
 
@@ -351,7 +352,7 @@ release.
 |-|-|
 |**Auto-detect**|Run detection over the Pages selection (§8). It is an **action, not a toggle**: never highlighted, always re-pressable. Disabled only when Split > 1, both anchors are OFF, or a batch is running.|
 |**Anchor Left / Anchor Top** (toggles, **on one line**)|Left/top edge from *this page's* detected content (ON) or the union edge (OFF). At least one anchor must be ON for a crop to exist.|
-|**Keep ratio** (toggle) + ratio field|When ON, the crop height is locked to `width / ratio` for **every** crop source — live auto crop, handle drag/move, offset edits, a hand-drawn rectangle and split rectangles, in both modes (§9.7). The ratio field is editable and defaults to the detected `W/H`.|
+|**Keep ratio** (toggle) + ratio field|When ON, the crop height is locked to `width / ratio` for **every** crop source — live auto crop, handle drag/move, offset edits, a hand-drawn rectangle and split rectangles, in both modes (§9.7). The ratio field is editable and **pre-populates with the current page's width / height** before detect runs (§7.1a); editing it updates the ratio for all following crops.|
 
 Re-running **Auto-detect refreshes** the committed crop on the pages it re-detects to the fresh auto
 crop — detection takes visible effect after a crop **without dropping it** (the page stays cropped,
@@ -384,7 +385,7 @@ scope once up top means changing the page set never requires scrolling back up. 
 
 ### 7.6 Compress Document
 
-A DPI menu: `Original resolution`, `High — 300 dpi`, `Medium — 150 dpi`, `Low — 72 dpi`. **Compress
+A DPI menu: `Original resolution`, `High — 300 dpi`, `Medium — 150 dpi`, `Low — 75 dpi`. **Compress
 resamples every embedded page image to the chosen DPI and writes a leaner file**, applied **last**,
 after crop (§12.6). `Original resolution` keeps the native crop pixels (no downsample). Lower DPI =
 smaller output. Below it, an **Output colours** menu: `Original colors`, `Grayscale` — Grayscale
@@ -471,8 +472,8 @@ At any moment a page's crop comes from exactly one of:
 
 1. **Live auto crop** — computed on the fly by the geometry in §9.2 from the cached `union` frame +
 anchors + offsets. Exists only when **split = 1**, auto-detect is active, and >= 1 anchor is ON.
-Drawn on the page as a dashed frame with **corner handles** (resize), **border handles** (move
-one edge) and a **move sign at the top-right corner** (move the whole rectangle).
+Drawn on the page as a dashed frame with **corner handles** (resize) and **border handles** (move
+one edge). Dragging inside the rectangle (away from handles) moves the whole box.
 It is **global**: the four offsets are shared, so editing it changes the live crop on every page.
 2. **Committed crop** — `applied\[page]`, a per-page list of one box (single) or N boxes (split).
 Set by **Apply**, by **drawing** a rectangle, or **refreshed by re-detect** (§7.4). It is the
@@ -552,18 +553,18 @@ is the only way back to the full page.
 (§12) — so a crop visible on screen is always saved.
 
 Drawing/editing snapshot history (undoable). The grab targets are the 4 **corners** (resize), the 4
-**borders** (move an edge) and the **move sign** at the top-right corner (move the whole rectangle);
+**borders** (move an edge), and the rectangle interior away from handles (move the whole rectangle);
 hit radius `HANDLE\_R + HANDLE\_SLACK`; cursors map to the action.
 
 ### 9.6 Mouse gestures (split = 2 / 4)
 
 Split 2/4 **auto-creates the N windows** as an even grid (§7.3); you adjust them with the **same
-gesture model as a single crop** (§9.3). Each window has a **move sign at its top-right corner**,
-draggable **borders**, and **corners** that resize. On **press**:
+gesture model as a single crop** (§9.3). Each window has draggable **borders** and **corners** that
+resize; dragging inside the rectangle (away from handles) moves the whole window. On **press**:
 
 |Press / drag|Result|
 |-|-|
-|a window's **move sign** (top-right corner)|move that whole window|
+|a window's interior (away from edges/corners)|move that whole window|
 |a window's **border** line|move just that edge|
 |a window's **corner**|resize that window|
 |**Esc** / **right-click** during a drag|cancel the drag (windows left unchanged)|
@@ -905,7 +906,7 @@ values into logic). `MIN\_RECT` lives in `geometry.py`; the bilevel kernel sizes
 # DPI / caches
 SRC\_DPI        = 200.0      NORMAL\_DPI    = 150.0     CACHE\_WINDOW = 16
 # crop geometry
-HANDLE\_R       = 8          HANDLE\_SLACK  = 6         CANVAS\_MARGIN = 40
+HANDLE\_R       = 10         HANDLE\_SLACK  = 6         CANVAS\_MARGIN = 40
 MIN\_RECT       = 5.0  (geometry.py)                   OFFSET\_LIMIT  = 100.0
 # classification / detection
 MODE\_TEXT\_MIN  = 8          DETECT\_MAX\_PX  = 1400     # text < this AND no vector path ⇒ page is image-only
@@ -918,7 +919,7 @@ SYNTH\_PAGES    = 24         STATUS\_IDLE\_MS = 2400     SCALE\_THROTTLE\_MS = 8
 UI\_SCALE\_MIN   = 0.7        UI\_SCALE\_MAX   = 2.0
 FONT\_SIZE\_MIN  = 10         FONT\_SIZE\_MAX  = 24       DEFAULT\_FONT\_SIZE = 15
 WINDOW\_SIZE    = "1560x1000"  WINDOW\_MIN   = (1040, 700)
-PANEL\_WIDTH    = 440        SETTINGS\_MIN\_W = 620
+PANEL\_WIDTH    = 320        SETTINGS\_MIN\_W = 520
 # data
 DPI\_PRESETS    = {"Original resolution": None, "High — 300 dpi": 300,
                   "Medium — 150 dpi": 150, "Low — 72 dpi": 72}   # Compress Document (§7.6)
@@ -944,9 +945,9 @@ Cards and chrome are warm off-white / warm charcoal. **Buttons are neutral at re
 (blue `ACCENT`) only when they represent an active state — the toggles (Dewarp, B/W, Sharpen) while
 on, and **Current** while following. **Auto-detect never highlights** (it is an action, not a
 toggle). Switch-on, segmented-selected, the crop frame (`CROP\_BLUE`) and split rectangles
-(`SPLIT\_BLUE`, thick lines + large numbers) all use blue. The status strip sits on a card chip. The
-mode badge is a non-interactive marker. Disabled controls dim. Every label stays legible in both
-modes. The window title shows the open file name.
+(`SPLIT\_BLUE`, thick lines + large numbers) all use blue. Status text is drawn on the page image
+at top-left with a shadow for readability. The mode badge is a non-interactive marker. Disabled controls dim.
+Every label stays legible in both modes. The window title shows the open file name.
 **Pictograms.** Settings, Help, Load, Save/Export, Apply Crop, Rotate (and other primary actions, §7),  pair an
 icon with their label via `image=` (a `CTkImage` with light/dark variants, §19 palette) — never
 concatenated into the label string (label text stays exactly the control's name; this matters for

@@ -3,6 +3,9 @@ window (never magnified, never overflowing — §5/§14), and translates raw Tk 
 into page-unit coordinates for `AppModel.begin_drag/update_drag/end_drag/cancel_drag`. All hit
 testing for cursor/clicks is the model's own (`core.geometry`, shared pure leaf) — this module
 owns only the canvas <-> page-unit coordinate mapping and event wiring, never gesture logic.
+
+Status text (page number, coordinates) is drawn directly on the canvas at the top of the page
+image instead of a separate bottom strip (bugs.txt #4).
 """
 from __future__ import annotations
 
@@ -16,15 +19,27 @@ from core.geometry import hit_handle, point_in_box
 from core.model import AppModel, ViewSnapshot
 from core.render import fit_scale
 from ui import overlay
-from ui.constants import CANVAS_MARGIN, HANDLE_CURSOR, HANDLE_R, HANDLE_SLACK, STATUS_IDLE_MS
+from ui.constants import (
+    CANVAS_MARGIN,
+    CANVAS_STATUS_FONT_SIZE,
+    HANDLE_CURSOR,
+    HANDLE_R,
+    HANDLE_SLACK,
+    STATUS_IDLE_MS,
+)
+
+_STATUS_FONT = ("", CANVAS_STATUS_FONT_SIZE)
+_STATUS_FG = "#e8e8e8"
+_STATUS_SHADOW = "#000000"
 
 
 class CanvasView:
-    def __init__(self, parent: ctk.CTkBaseClass, model: AppModel, on_change: Callable[[], None],
-                 status_label: ctk.CTkLabel) -> None:
+    def __init__(self, parent: ctk.CTkBaseClass, model: AppModel,
+                 on_change: Callable[[], None],
+                 on_nav: Callable[[], None] | None = None) -> None:
         self.model = model
         self._on_change = on_change
-        self._status_label = status_label
+        self._on_nav = on_nav or on_change
         self.canvas = tk.Canvas(parent, highlightthickness=0, bg="#1b1b1b")
         self.canvas.pack(fill="both", expand=True)
         self._scale = 1.0
@@ -52,16 +67,28 @@ class CanvasView:
         self._snap = snap
         self.canvas.delete("all")
         cw, ch = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
-        self._scale = fit_scale(snap.page_w, snap.page_h, cw, ch, CANVAS_MARGIN)
+        self._scale = fit_scale(snap.page_w, snap.page_h, cw, ch, 0)
         iw = max(1, round(snap.page_w * self._scale))
         ih = max(1, round(snap.page_h * self._scale))
-        self._img_x, self._img_y = (cw - iw) / 2, (ch - ih) / 2
+        self._img_x = (cw - iw) / 2
+        # Bottom-align: page image sits near the bottom of the canvas (bugs.txt #4)
+        self._img_y = max(0, (ch - ih) // 2 if ih < ch else 0)
         resized = snap.image.resize((iw, ih), Image.Resampling.LANCZOS)
         self._photo = ImageTk.PhotoImage(resized)  # type: ignore[no-untyped-call]
         self.canvas.create_image(self._img_x, self._img_y, anchor="nw", image=self._photo)
         overlay.draw_overlay(self.canvas, snap.overlay, snap.draw_rect, self._to_canvas)
-        self._status_label.configure(text=snap.status)
+        self._draw_status(snap.status)
         return snap
+
+    def _draw_status(self, text: str) -> None:
+        if not text: return
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        x, y = cw - 8, ch - 8
+        self.canvas.create_text(x + 1, y + 1, text=text, anchor="se",
+                                fill=_STATUS_SHADOW, font=_STATUS_FONT, tags="status")
+        self.canvas.create_text(x, y, text=text, anchor="se",
+                                fill=_STATUS_FG, font=_STATUS_FONT, tags="status")
 
     # ── coordinate mapping ────────────────────────────────────────────────────────────────────
     def _to_page(self, cx: float, cy: float) -> tuple[float, float]:
@@ -99,17 +126,17 @@ class CanvasView:
     # ── wheel turns pages, never zooms (§5, §21) ─────────────────────────────────────────────
     def _wheel(self, event: tk.Event[tk.Misc]) -> None:
         (self.model.prev_page if event.delta > 0 else self.model.next_page)()
-        self._on_change()
+        self._on_nav()
 
     def _wheel_prev(self, _event: tk.Event[tk.Misc]) -> None:
         self.model.prev_page()
-        self._on_change()
+        self._on_nav()
 
     def _wheel_next(self, _event: tk.Event[tk.Misc]) -> None:
         self.model.next_page()
-        self._on_change()
+        self._on_nav()
 
-    # ── hover: cursor maps to the action (§9.5); transient coordinate read-out (§6) ─────────
+    # ── hover: cursor maps to the action (§9.5); coordinate read-out on canvas (§6) ─────────
     def _motion(self, event: tk.Event[tk.Misc]) -> None:
         snap = self._snap
         if snap is None:
@@ -132,14 +159,25 @@ class CanvasView:
 
     def _update_status(self, snap: ViewSnapshot, px: float, py: float) -> None:
         if snap.page_w <= 0 or not (0 <= px <= snap.page_w and 0 <= py <= snap.page_h):
+            self._clear_status()
             return
         pct_x, pct_y = px / snap.page_w * 100.0, py / snap.page_h * 100.0
-        self._status_label.configure(text=f"x {pct_x:.1f}%  y {pct_y:.1f}%")
+        self._set_status_text(f"x {pct_x:.1f}%  y {pct_y:.1f}%")
         if self._idle_after is not None:
-            self._status_label.after_cancel(self._idle_after)
-        self._idle_after = self._status_label.after(STATUS_IDLE_MS, self._revert_status)
+            self.canvas.after_cancel(self._idle_after)
+        self._idle_after = self.canvas.after(STATUS_IDLE_MS, self._clear_status)
+
+    def _set_status_text(self, text: str) -> None:
+        self.canvas.delete("status")
+        self._draw_status(text)
 
     def _revert_status(self) -> None:
         self._idle_after = None
         if self._snap is not None:
-            self._status_label.configure(text=self._snap.status)
+            self._set_status_text(self._snap.status)
+
+    def _clear_status(self) -> None:
+        self._idle_after = None
+        self.canvas.delete("status")
+
+

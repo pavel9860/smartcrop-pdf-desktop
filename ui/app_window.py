@@ -5,6 +5,7 @@ and event wiring — domain logic stays in `AppModel`, presentation wiring stays
 """
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -36,6 +37,7 @@ from ui.ui_build import (
     build_settings_window,
     highlight_button,
     set_entry_text,
+    tooltip,
 )
 
 
@@ -58,6 +60,7 @@ class SmartCropApp:
         self._build_right_pane()
         self._bind_shortcuts()
         root.report_callback_exception = self._handle_callback_error
+        root.update_idletasks()
         self.refresh_all()
 
     # ── construction (spec §6 layout) ─────────────────────────────────────────
@@ -74,12 +77,12 @@ class SmartCropApp:
     def _build_right_pane(self) -> None:
         right_outer = ctk.CTkFrame(self.root, fg_color="transparent")
         right_outer.pack(side="left", fill="both", expand=True)
-        self.status_label = ctk.CTkLabel(right_outer, text="", font=self.fonts.base, anchor="e")
-        self.status_label.pack(side="bottom", anchor="e", padx=10, pady=6)
+        # Canvas fills the full right pane; status is drawn ON the canvas (bugs.txt #4)
         canvas_holder = ctk.CTkFrame(right_outer, fg_color="transparent")
         canvas_holder.pack(side="top", fill="both", expand=True)
-        self.canvas_view = CanvasView(canvas_holder, self.model, self.refresh_all,
-                                       self.status_label)
+        self.canvas_view = CanvasView(canvas_holder, self.model,
+                                       on_change=self.refresh_all,
+                                       on_nav=self._nav_redraw)
         self.progress = ProgressCard(canvas_holder, self.fonts, self._cancel_job)
 
     def _build_pinned_bar(self, parent: ctk.CTkBaseClass) -> None:
@@ -95,8 +98,10 @@ class SmartCropApp:
         row.pack(fill="x")
         self.btn_settings = highlight_button(row, "⚙  Settings", self._open_settings, self.fonts)
         self.btn_settings.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tooltip(self.btn_settings, "Open appearance, output and behaviour settings", self.fonts)
         self.btn_help = highlight_button(row, "?  Help", self._open_help, self.fonts)
         self.btn_help.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        tooltip(self.btn_help, "Open quick-start guide and keyboard shortcuts", self.fonts)
 
     def _build_history_row(self) -> None:
         row = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
@@ -105,33 +110,40 @@ class SmartCropApp:
         self.btn_undo = highlight_button(
             row, "↩  Undo", lambda: self.dispatch(self.model.undo), self.fonts)
         self.btn_undo.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        tooltip(self.btn_undo, "Undo last crop, rotate, dewarp or filter (Ctrl+Z)", self.fonts)
         self.btn_redo = highlight_button(
             row, "↪  Redo", lambda: self.dispatch(self.model.redo), self.fonts)
         self.btn_redo.grid(row=0, column=1, sticky="ew", padx=3)
+        tooltip(self.btn_redo, "Redo last undone action (Ctrl+Y)", self.fonts)
         self.btn_reset = highlight_button(
             row, "↺  Reset", lambda: self.dispatch(self.model.reset), self.fonts)
         self.btn_reset.grid(row=0, column=2, sticky="ew", padx=(3, 0))
+        tooltip(self.btn_reset, "Re-open the document and clear all crops, rotations and history",
+                self.fonts)
 
     def _build_page_nav_row(self) -> None:
         row = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
         row.pack(fill="x", pady=(8, 0))
-        row.columnconfigure(0, weight=0)
-        row.columnconfigure(1, weight=1)
-        row.columnconfigure(2, weight=0)
-        self.btn_prev = highlight_button(row, "◀", lambda: self.dispatch(self.model.prev_page),
-                                          self.fonts, width=36, height=36)
-        self.btn_prev.grid(row=0, column=0, sticky="w")
+        row.columnconfigure((0, 1, 2), weight=1, uniform="pnr")
+        self.btn_prev = highlight_button(
+            row, "◀ Prev", lambda: self._nav(self.model.prev_page),
+            self.fonts, height=36)
+        self.btn_prev.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        tooltip(self.btn_prev, "Previous page (← or PgUp or mouse wheel up)", self.fonts)
         centre = ctk.CTkFrame(row, fg_color="transparent")
-        centre.grid(row=0, column=1)
-        self.entry_page = ctk.CTkEntry(centre, width=60, font=self.fonts.base, justify="center")
-        self.entry_page.pack(side="left")
+        centre.grid(row=0, column=1, sticky="ew", padx=3)
+        self.entry_page = ctk.CTkEntry(centre, width=44, font=self.fonts.base, justify="center")
+        self.entry_page.pack(side="left", expand=True)
         self.entry_page.bind("<Return>", self._jump_to_page)
+        tooltip(self.entry_page, "Type a page number and press Enter to jump", self.fonts)
         self.lbl_total = ctk.CTkLabel(centre, text="/ 0", font=self.fonts.base,
-                                       text_color=THEMES["muted"])
+                                      text_color=THEMES["muted"], width=44, anchor="w")
         self.lbl_total.pack(side="left", padx=(6, 0))
-        self.btn_next = highlight_button(row, "▶", lambda: self.dispatch(self.model.next_page),
-                                          self.fonts, width=36, height=36)
-        self.btn_next.grid(row=0, column=2, sticky="e")
+        self.btn_next = highlight_button(
+            row, "Next ▶", lambda: self._nav(self.model.next_page),
+            self.fonts, height=36)
+        self.btn_next.grid(row=0, column=2, sticky="ew", padx=(3, 0))
+        tooltip(self.btn_next, "Next page (→ or PgDn or mouse wheel down)", self.fonts)
 
     # ── dispatch (ARCHITECTURE §6: the only two SmartCropError catch sites) ──────────────────
     def dispatch(self, command: Callable[[], None]) -> None:
@@ -165,6 +177,7 @@ class SmartCropApp:
             job.step()
             if job.total > 1:
                 self.progress.paint(job)
+                self.root.update_idletasks()    # flush progress paint before next page's work (§14)
             self.root.after(1, self._drive)
             return
         self.progress.hide()
@@ -178,12 +191,20 @@ class SmartCropApp:
         if self._current_job is not None:
             self._current_job.cancel()
 
-    # ── refresh (ARCHITECTURE §3: re-read the model, re-set widgets unconditionally) ─────────
+    # ── refresh ───────────────────────────────────────────────────────────────────────────────
     def refresh_all(self) -> None:
         busy = self._current_job is not None
         self.panel.refresh(busy)
         snap = self.canvas_view.redraw()
         self._refresh_nav_bar(snap, busy)
+
+    def _nav_redraw(self) -> None:
+        """Fast-path for page navigation: only redraws canvas + nav bar, skips panel (§B4)."""
+        busy = self._current_job is not None
+        snap = self.canvas_view.redraw()
+        self._refresh_nav_bar(snap, busy)
+        if self.model.current_follow:           # follow mode updates the pattern entry
+            self.panel.refresh_pages(busy)
 
     def _refresh_nav_bar(self, snap: ViewSnapshot, busy: bool) -> None:
         set_entry_text(self.entry_page, str(snap.position))
@@ -203,12 +224,31 @@ class SmartCropApp:
             return
         self.dispatch(lambda: self.model.jump_to_output_page(n))
 
+    # ── navigation fast path ──────────────────────────────────────────────────────────────────
+    def _nav(self, command: Callable[[], None]) -> None:
+        """Call a nav command and use the fast redraw path."""
+        if self._current_job is not None:
+            return                              # busy: ignore nav
+        command()
+        self._nav_redraw()
+
     # ── commands needing a dialog (load / export / delete) ───────────────────
     def _load_files(self) -> None:
         patterns = " ".join(f"*{ext}" for ext in IMAGE_LOAD_EXT)
         paths = filedialog.askopenfilenames(filetypes=[("PDF and images", patterns)])
         if paths:
             self.dispatch(lambda: self.model.load_files(list(paths)))
+        self._update_title()
+
+    def _update_title(self) -> None:
+        """Show the open file name in the window title (spec §7.1, bugs.txt #12)."""
+        if self.model.input_paths:
+            name = os.path.basename(self.model.input_paths[0])
+            if len(self.model.input_paths) > 1:
+                name += " …"
+            self.root.title(f"SmartCrop PDF  {name}")
+        else:
+            self.root.title("SmartCrop PDF")
 
     def _delete_pages(self) -> None:
         if messagebox.askyesno("Delete pages",
@@ -273,8 +313,13 @@ class SmartCropApp:
     def _is_typing_target(self) -> bool:
         return isinstance(self.root.focus_get(), tk.Entry)
 
+    def _guarded_nav(self, command: Callable[[], None]) -> Callable[[tk.Event[tk.Misc]], None]:
+        def _handler(_event: tk.Event[tk.Misc]) -> None:
+            if not self._is_typing_target():
+                self._nav(command)
+        return _handler
+
     def _guarded(self, command: Callable[[], None]) -> Callable[[tk.Event[tk.Misc]], None]:
-        """Wrap a page-nav/undo-redo shortcut so it yields to normal text-entry editing."""
         def _handler(_event: tk.Event[tk.Misc]) -> None:
             if not self._is_typing_target():
                 self.dispatch(command)
@@ -282,15 +327,15 @@ class SmartCropApp:
 
     def _bind_shortcuts(self) -> None:
         r = self.root
-        r.bind_all("<Control-o>", lambda _e: self._load_files())
+        r.bind_all("<Escape>", lambda _e: self.canvas_view.handle_escape())
         r.bind_all("<Control-Return>", lambda _e: self.dispatch(self.model.apply_crop))
         r.bind_all("<Control-s>", lambda _e: self._export())
         r.bind_all("<Control-z>", self._guarded(self.model.undo))
         r.bind_all("<Control-y>", self._guarded(self.model.redo))
-        r.bind_all("<Left>", self._guarded(self.model.prev_page))
-        r.bind_all("<Right>", self._guarded(self.model.next_page))
-        r.bind_all("<Prior>", self._guarded(self.model.prev_page))
-        r.bind_all("<Next>", self._guarded(self.model.next_page))
+        r.bind_all("<Left>", self._guarded_nav(self.model.prev_page))
+        r.bind_all("<Right>", self._guarded_nav(self.model.next_page))
+        r.bind_all("<Prior>", self._guarded_nav(self.model.prev_page))
+        r.bind_all("<Next>", self._guarded_nav(self.model.next_page))
         r.bind_all("<Control-plus>", lambda _e: self._scale_step(1))
         r.bind_all("<Control-equal>", lambda _e: self._scale_step(1))
         r.bind_all("<Control-minus>", lambda _e: self._scale_step(-1))

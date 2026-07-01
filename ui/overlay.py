@@ -1,6 +1,6 @@
 """Crop-rect + handle drawing onto the page canvas (spec §9). Pure drawing: given boxes already
 mapped to canvas pixels (via the caller's `to_canvas`), draws the dashed auto-crop frame or the
-numbered split rectangles, their 8 handles and the move-sign. No model access, no event handling
+numbered split rectangles, their 8 handles, move-sign and numbered badge. No model access, no event handling
 — canvas_view.py owns the coordinate mapping and gesture wiring.
 """
 from __future__ import annotations
@@ -10,9 +10,17 @@ from collections.abc import Callable
 
 from core.geometry import Box, handle_positions
 from core.model import OverlayBox
-from ui.constants import THEMES
+from ui.constants import (
+    HANDLE_R,
+    SPLIT_BADGE_FONT_SIZE,
+    SPLIT_BADGE_MARGIN,
+    SPLIT_BADGE_R,
+    THEMES,
+)
 
 ToCanvas = Callable[[float, float], tuple[float, float]]
+
+_WINDOW_DASH = (6, 4)  # every crop/split window border is dashed (spec §9.1, §9.6)
 
 
 def draw_overlay(canvas: tk.Canvas, boxes: tuple[OverlayBox, ...], draw_rect: Box | None,
@@ -30,25 +38,35 @@ def _draw_box(canvas: tk.Canvas, box: Box, to_canvas: ToCanvas, *, kind: str, in
     x0, y0 = to_canvas(box.x0, box.y0)
     x1, y1 = to_canvas(box.x1, box.y1)
     colour = str(THEMES["split_blue"]) if kind == "split" else str(THEMES["crop_blue"])
-    dash = () if kind == "split" else (6, 4)
     canvas.create_rectangle(x0, y0, x1, y1, outline=colour, width=3 if kind == "split" else 2,
-                             dash=dash, tags="overlay")
+                             dash=_WINDOW_DASH, tags="overlay")
     _draw_handles(canvas, Box(x0, y0, x1, y1), colour)
-    _draw_move_sign(canvas, x1, y0, colour)
     if kind == "split":
-        canvas.create_text(x0 + 14, y0 + 12, text=str(index + 1), fill=colour,
-                            font=("", 14, "bold"), tags="overlay")
+        _draw_split_badge(canvas, x0, y0, colour, index)
 
 
 def _draw_handles(canvas: tk.Canvas, canvas_box: Box, colour: str) -> None:
     for _name, (hx, hy) in handle_positions(canvas_box).items():
-        canvas.create_rectangle(hx - 4, hy - 4, hx + 4, hy + 4, fill=colour, outline="",
-                                 tags="overlay")
+        canvas.create_rectangle(hx - HANDLE_R, hy - HANDLE_R, hx + HANDLE_R, hy + HANDLE_R,
+                                 fill=colour, outline="", tags="overlay")
 
 
 def _draw_move_sign(canvas: tk.Canvas, x1: float, y0: float, colour: str) -> None:
-    """Cosmetic affordance at the top-right corner (§9.1); the model treats any non-handle point
-    inside the box as a move, so this glyph marks intent rather than gating a separate hit-zone."""
+    """Cosmetic affordance at the top-right corner of the (non-split) crop rectangle (§9.1); the
+    model treats any non-handle point inside the box as a move, so this glyph marks intent rather
+    than gating a separate hit-zone. Split windows have no move-sign — their top-right corner is
+    free, and they're moved the same interior-click way (§9.6); the top-left corner instead carries
+    the numbered badge."""
     r = 6.0
     canvas.create_oval(x1 - 2.4 * r, y0 - 0.4 * r, x1 + 0.4 * r, y0 + 2.4 * r,
                         outline=colour, width=2, tags="overlay")
+
+
+def _draw_split_badge(canvas: tk.Canvas, x0: float, y0: float, colour: str, index: int) -> None:
+    """Numbered badge marking output order, at the window's top-left corner (spec §9.6)."""
+    cx = x0 + SPLIT_BADGE_MARGIN + SPLIT_BADGE_R
+    cy = y0 + SPLIT_BADGE_MARGIN + SPLIT_BADGE_R
+    canvas.create_oval(cx - SPLIT_BADGE_R, cy - SPLIT_BADGE_R, cx + SPLIT_BADGE_R,
+                        cy + SPLIT_BADGE_R, outline=colour, width=2, fill="", tags="overlay")
+    canvas.create_text(cx, cy, text=str(index + 1), fill=colour,
+                        font=("", SPLIT_BADGE_FONT_SIZE, "bold"), tags="overlay")

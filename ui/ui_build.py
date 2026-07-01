@@ -4,7 +4,6 @@ from __future__ import annotations
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import filedialog
-
 import customtkinter as ctk
 
 from core.batch import BatchJob
@@ -25,28 +24,32 @@ class Fonts:
     def __init__(self, base_size: int) -> None:
         self.base = ctk.CTkFont(size=base_size)
         self.bold = ctk.CTkFont(size=base_size, weight="bold")
-        self.title = ctk.CTkFont(size=base_size + 2, weight="bold")
-        self.help = ctk.CTkFont(size=base_size + 1)
+        self.title = ctk.CTkFont(size=base_size, weight="bold")
+        self.help = ctk.CTkFont(size=base_size)
 
     def resize(self, base_size: int) -> None:
         self.base.configure(size=base_size)
         self.bold.configure(size=base_size)
-        self.title.configure(size=base_size + 2)
-        self.help.configure(size=base_size + 1)
+        self.title.configure(size=base_size)
+        self.help.configure(size=base_size)
 
 
 class Tooltip:
-    def __init__(self, widget: ctk.CTkBaseClass, text: str) -> None:
+    def __init__(self, widget: ctk.CTkBaseClass, text: str, fonts: Fonts | None = None) -> None:
         self._widget = widget
         self._text = text
         self._win = ctk.CTkToplevel(widget)
         self._win.wm_overrideredirect(True)
         self._win.withdraw()
         ctk.CTkLabel(self._win, text=text, corner_radius=6, padx=8, pady=4,
-                     fg_color=THEMES["card"]).pack()
-        widget.bind("<Enter>", self._show, add="+")
-        widget.bind("<Leave>", self._hide, add="+")
-        widget.bind("<Destroy>", self._destroy, add="+")
+                     fg_color=THEMES["card"],
+                     font=fonts.base if fonts is not None else None).pack()
+        try:
+            widget.bind("<Enter>", self._show, add="+")
+            widget.bind("<Leave>", self._hide, add="+")
+            widget.bind("<Destroy>", self._destroy, add="+")
+        except NotImplementedError:
+            self._win.destroy()  # widget doesn't support bind; discard the tooltip
 
     def _show(self, _event: tk.Event[tk.Misc]) -> None:
         if not self._text:
@@ -63,8 +66,8 @@ class Tooltip:
         self._win.destroy()
 
 
-def tooltip(widget: ctk.CTkBaseClass, text: str) -> None:
-    Tooltip(widget, text)
+def tooltip(widget: ctk.CTkBaseClass, text: str, fonts: Fonts | None = None) -> None:
+    Tooltip(widget, text, fonts)
 
 
 def card(parent: ctk.CTkBaseClass, title: str, fonts: Fonts) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
@@ -90,19 +93,36 @@ def set_active(button: ctk.CTkButton, active: bool) -> None:
                       text_color=THEMES["accent_text"] if active else THEMES["secondary_text"])
 
 
-def option_menu(parent: ctk.CTkBaseClass, fonts: Fonts, **kwargs: object) -> ctk.CTkOptionMenu:
-    """CTkOptionMenu with THEMES colours — neutral (secondary) at rest, never accent blue."""
-    return ctk.CTkOptionMenu(
-        parent, font=fonts.base,
+def option_menu(parent, fonts, **kwargs):
+    values = kwargs.get("values", [])
+    menu = ctk.CTkOptionMenu(parent, font=fonts.base,
         fg_color=THEMES["secondary"], button_color=THEMES["secondary"],
         button_hover_color=THEMES["secondary_hover"], text_color=THEMES["secondary_text"],
         **kwargs)
-
+    if values:
+        menu._dropdown_menu.configure(min_character_width=max(len(v) for v in values))
+    return menu
 
 def labeled_row(parent: ctk.CTkBaseClass, label: str, fonts: Fonts) -> ctk.CTkFrame:
     row = ctk.CTkFrame(parent, fg_color="transparent")
     ctk.CTkLabel(row, text=label, anchor="w", font=fonts.base, width=140).pack(side="left")
     return row
+
+
+def export_split_button(
+        parent: ctk.CTkBaseClass, fmt: str, fonts: Fonts, on_export: Callable[[], None],
+        on_pick_format: Callable[[str], None]
+) -> tuple[ctk.CTkFrame, ctk.CTkButton, ctk.CTkOptionMenu]:
+    frame = ctk.CTkFrame(parent, fg_color="transparent")
+    main = ctk.CTkButton(frame, text=f"💾  Export {fmt}", command=on_export, font=fonts.base,
+                          fg_color=THEMES["secondary"], hover_color=THEMES["secondary_hover"],
+                          text_color=THEMES["secondary_text"])
+    main.pack(side="left", fill="x", expand=True)
+    fmt_menu = option_menu(frame, fonts, values=list(EXPORT_FORMATS), command=on_pick_format,
+                            width=90, dynamic_resizing=False)
+    fmt_menu.set(fmt)
+    fmt_menu.pack(side="left", padx=(4, 0))
+    return frame, main, fmt_menu
 
 
 def offset_spinner(parent: ctk.CTkBaseClass, label: str, value: float,
@@ -112,7 +132,7 @@ def offset_spinner(parent: ctk.CTkBaseClass, label: str, value: float,
     frame = ctk.CTkFrame(parent, fg_color="transparent")
     ctk.CTkLabel(frame, text=label, width=16, font=fonts.base,
                  text_color=THEMES["muted"]).pack(side="left")
-    entry = ctk.CTkEntry(frame, width=64, font=fonts.base)
+    entry = ctk.CTkEntry(frame, width=47, font=fonts.base)
     entry.insert(0, f"{value:.1f}")
     entry.pack(side="left", padx=(2, 0))
 
@@ -154,7 +174,7 @@ def build_settings_window(parent: ctk.CTk, settings: Settings, ui_config: UIConf
 
     win.update_idletasks()
     # Size to content — no large hardcoded floor
-    w = max(460, body.winfo_reqwidth() + 40)
+    w = max(320, body.winfo_reqwidth())
     h = body.winfo_reqheight() + 40
     win.geometry(f"{w}x{h}")
     win.minsize(w, h)
@@ -222,13 +242,14 @@ def _output_section(body: ctk.CTkBaseClass, settings: Settings, fonts: Fonts,
     fm.pack(side="right")
     row.pack(fill="x", pady=4)
 
-    row = _srow(sec, "Output folder", fonts)
-    ctk.CTkButton(row, text="…", width=36, font=fonts.base, command=lambda: _pick_folder(row, entry, settings),
+    row = _srow(sec, "Output Folder", fonts)
+    entry = ctk.CTkEntry(row, font=fonts.base, placeholder_text="same as source", width=180)
+    entry.insert(0, settings.output_folder or "")
+    ctk.CTkButton(row, text="…", width=36, font=fonts.base,
+                  command=lambda: _pick_folder(row, entry, settings),
                   fg_color=THEMES["secondary"], hover_color=THEMES["secondary_hover"],
                   text_color=THEMES["secondary_text"]).pack(side="right")
-    entry = ctk.CTkEntry(row, font=fonts.base, placeholder_text="same as source")
-    entry.insert(0, settings.output_folder or "")
-    entry.pack(side="right", fill="x", expand=True, padx=(8, 6))
+    entry.pack(side="right", fill="x", padx=(8, 6))
 
     def _commit_folder(_event: object = None) -> None:
         value = entry.get().strip()
@@ -285,7 +306,7 @@ def _scan_section(body: ctk.CTkBaseClass, settings: Settings, fonts: Fonts) -> N
     outer.pack(fill="x")
 
     row = _srow(sec, "Dewarp supersample", fonts)
-    entry = ctk.CTkEntry(row, width=60, font=fonts.base)
+    entry = ctk.CTkEntry(row, width=48, font=fonts.base)
     entry.insert(0, str(settings.dewarp_supersample))
 
     def _commit(_event: object = None) -> None:
@@ -359,42 +380,6 @@ def build_help_window(parent: ctk.CTk, fonts: Fonts) -> ctk.CTkToplevel:
                       font=fonts.help).pack(fill="x", pady=(2, 0))
         anchors[section.title] = frame
     return win
-
-
-# ── Export split button ──────────────────────────────────────────────────────
-def export_split_button(
-        parent: ctk.CTkBaseClass, fmt: str, fonts: Fonts, on_export: Callable[[], None],
-        on_pick_format: Callable[[str], None]) -> tuple[ctk.CTkFrame, ctk.CTkButton]:
-    frame = ctk.CTkFrame(parent, fg_color="transparent")
-    main = ctk.CTkButton(frame, text=f"💾  Export {fmt}", command=on_export, font=fonts.base,
-                          fg_color=THEMES["secondary"], hover_color=THEMES["secondary_hover"],
-                          text_color=THEMES["secondary_text"])
-    main.pack(side="left", fill="x", expand=True)
-
-    def _pick(choice: str) -> Callable[[], None]:
-        return lambda: on_pick_format(choice)
-
-    def _open_menu() -> None:
-        menu = tk.Menu(frame, tearoff=False)
-        for choice in EXPORT_FORMATS:
-            menu.add_command(label=choice, command=_pick(choice))
-        menu.tk_popup(frame.winfo_pointerx(), frame.winfo_pointery())
-
-    # Show current format + arrow so the user can see what format is active
-    fmt_btn = ctk.CTkButton(frame, text=f"{fmt} ▾", width=72, font=fonts.base,
-                             command=_open_menu,
-                             fg_color=THEMES["secondary"], hover_color=THEMES["secondary_hover"],
-                             text_color=THEMES["secondary_text"])
-    fmt_btn.pack(side="left", padx=(4, 0))
-    return frame, main
-
-
-def update_export_fmt_btn(frame: ctk.CTkFrame, fmt: str) -> None:
-    """Update the format label on the ▾ button when format changes."""
-    for child in frame.winfo_children():
-        if isinstance(child, ctk.CTkButton) and "▾" in (child.cget("text") or ""):
-            child.configure(text=f"{fmt} ▾")
-            break
 
 
 # ── Progress overlay ─────────────────────────────────────────────────────────

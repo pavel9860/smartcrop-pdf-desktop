@@ -1,6 +1,6 @@
 """Left-panel widget construction + refresh (spec §6/§7). Cards in the spec §6 layout order:
 Document, Pages-to-Process, Scan Processing (scanned only), Split, Detect Text Borders, Advanced
-(collapsed by default), Actions (Crop/Rotate/Delete), Compress, Export. Each card's refresh()
+(collapsed by default), Actions (Crop/Rotate/Delete), Output Quality, Export. Each card's refresh()
 reads raw model properties + the window's busy flag; no business logic lives here — the handful
 of commands that need a dialog (load/export/delete) are supplied as callbacks by app_window.py.
 """
@@ -23,12 +23,12 @@ from ui.ui_build import (
     card,
     export_split_button,
     highlight_button,
+    labeled_row,
     offset_spinner,
     option_menu,
     set_active,
     set_entry_text,
     tooltip,
-    update_export_fmt_btn,
 )
 
 Dispatch = Callable[[Callable[[], None]], None]
@@ -63,8 +63,10 @@ def _set_visible(widget: ctk.CTkBaseClass, visible: bool, **pack_opts: object) -
 
 
 def _set_state(widgets: tuple[ctk.CTkBaseClass, ...], enabled: bool) -> None:
+    state = "normal" if enabled else "disabled"
     for w in widgets:
-        w.configure(state="normal" if enabled else "disabled")
+        if w.cget("state") != state:
+            w.configure(state=state)
 
 
 class LeftPanel:
@@ -105,7 +107,8 @@ class LeftPanel:
         self.btn_load = highlight_button(body, "Load PDF/Image Files",
                                           self._cb.on_load_files, self.fonts)
         self.btn_load.pack(fill="x")
-        tooltip(self.btn_load, "Open one or many PDFs/images, combined in pick order (Ctrl+O)")
+        tooltip(self.btn_load, "Open one or many PDFs/images, combined in pick order (Ctrl+O)",
+                self.fonts)
 
     def _refresh_document(self, busy: bool) -> None:
         scan = self.model.mode.value == "scanned"
@@ -124,6 +127,7 @@ class LeftPanel:
                 lambda: self.model.set_pages_mode(_PAGES_BY_LABEL[v])),
             **_seg_kwargs())
         self.seg_pages.pack(fill="x")
+        tooltip(self.seg_pages, "Choose which pages actions apply to", self.fonts)
         self.pattern_row = ctk.CTkFrame(body, fg_color="transparent")
         ctk.CTkLabel(self.pattern_row, text="Pattern", font=self.fonts.base).pack(side="left")
         self.btn_current = highlight_button(self.pattern_row, "Current", self._toggle_current,
@@ -133,8 +137,8 @@ class LeftPanel:
         self.entry_pattern.pack(side="left", padx=(4, 4), fill="x", expand=True)
         self.entry_pattern.bind("<Return>", self._commit_pattern)
         self.entry_pattern.bind("<FocusOut>", self._commit_pattern)
-        tooltip(self.entry_pattern, "1,3,5-9 or Python-style start:stop:step slices")
-        tooltip(self.btn_current, "Follow the page you're viewing")
+        tooltip(self.entry_pattern, "1,3,5-9 or Python-style start:stop:step slices", self.fonts)
+        tooltip(self.btn_current, "Follow the page you're viewing", self.fonts)
 
     def _commit_pattern(self, _event: object = None) -> None:
         self._cb.dispatch(lambda: self.model.set_select_pattern(self.entry_pattern.get()))
@@ -146,7 +150,12 @@ class LeftPanel:
         m = self.model
         new_pages = _PAGES_LABELS[m.pages_mode]
         if self.seg_pages.get() != new_pages:
+            # Suppress command= during programmatic set to prevent re-entrant dispatch (#14)
+            self.seg_pages.configure(command=None)
             self.seg_pages.set(new_pages)
+            self.seg_pages.configure(
+                command=lambda v: self._cb.dispatch(
+                    lambda: self.model.set_pages_mode(_PAGES_BY_LABEL[v])))
         show_pattern = m.pages_mode == PagesMode.SELECT
         _set_visible(self.pattern_row, show_pattern, fill="x", pady=(6, 0))
         if show_pattern:
@@ -161,7 +170,8 @@ class LeftPanel:
             body, "Dewarp & Deskew", lambda: self._cb.dispatch_job(self.model.run_dewarp),
             self.fonts)
         self.btn_dewarp.pack(fill="x")
-        tooltip(self.btn_dewarp, "Straighten page curl and skew (idempotent from source)")
+        tooltip(self.btn_dewarp, "Straighten page curl and skew (idempotent from source)",
+                self.fonts)
         filt_outer, filt_body = card(body, "Filter", self.fonts)
         filt_outer.pack(fill="x", pady=(8, 0))
         self._build_filter_buttons(filt_body)
@@ -174,10 +184,13 @@ class LeftPanel:
             row, "B/W", lambda: self._cb.dispatch_job(
                 lambda: self.model.set_filter_mode(FilterMode.BW)), self.fonts)
         self.btn_bw.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tooltip(self.btn_bw, "Convert to pure black & white", self.fonts)
         self.btn_sharpen = highlight_button(
             row, "Sharpen", lambda: self._cb.dispatch_job(
                 lambda: self.model.set_filter_mode(FilterMode.SHARPEN)), self.fonts)
         self.btn_sharpen.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        tooltip(self.btn_sharpen, "Flatten uneven lighting and sharpen; keeps gray tones",
+                self.fonts)
 
     def _build_strength_row(self, parent: ctk.CTkBaseClass) -> None:
         ctk.CTkLabel(parent, text="Strength", font=self.fonts.base, anchor="w").pack(
@@ -186,9 +199,11 @@ class LeftPanel:
         btn_row.pack(fill="x")
         btn_row.columnconfigure((0, 1, 2), weight=1, uniform="str")
         self.strength_buttons: dict[int, ctk.CTkButton] = {}
+        _strength_tips = {1: "Cautious", 2: "Default", 3: "Aggressive"}
         for col, n in enumerate((1, 2, 3)):
             b = highlight_button(btn_row, str(n), self._make_strength_handler(n), self.fonts)
             b.grid(row=0, column=col, sticky="ew", padx=(0, 4) if col < 2 else 0)
+            tooltip(b, _strength_tips[n], self.fonts)
             self.strength_buttons[n] = b
 
     def _make_strength_handler(self, n: int) -> Callable[[], None]:
@@ -198,13 +213,17 @@ class LeftPanel:
         m = self.model
         _set_visible(self.scan_outer, m.mode == Mode.SCANNED, fill="x", pady=(0, 10),
                      before=self.split_outer)
-        set_active(self.btn_dewarp, m.dewarp_on)
-        set_active(self.btn_bw, m.filter_mode == FilterMode.BW)
-        set_active(self.btn_sharpen, m.filter_mode == FilterMode.SHARPEN)
+        # Use selection-based state: highlight only when every selected page has that processing
+        set_active(self.btn_dewarp, m.selection_dewarp_on)
+        sel_filter = m.selection_filter     # (mode, strength) or None
+        fmode = sel_filter[0] if sel_filter else FilterMode.NONE
+        fstrength = sel_filter[1] if sel_filter else m.filter_strength
+        set_active(self.btn_bw, fmode == FilterMode.BW)
+        set_active(self.btn_sharpen, fmode == FilterMode.SHARPEN)
         for n, btn in self.strength_buttons.items():
-            set_active(btn, m.filter_mode != FilterMode.NONE and m.filter_strength == n)
-        _set_state((self.btn_dewarp, self.btn_bw, self.btn_sharpen,
-                    *self.strength_buttons.values()), not busy)
+            set_active(btn, fstrength == n)
+        _set_state((self.btn_dewarp, self.btn_bw, self.btn_sharpen), not busy)
+        _set_state(tuple(self.strength_buttons.values()), not busy)  # always enabled (#13)
 
     # ── Split Each Page Into (§7.3, §9.6) + Keep ratio (§7.4, placed here per §6) ─────────
     def _build_split(self) -> None:
@@ -217,6 +236,8 @@ class LeftPanel:
             **_seg_kwargs())
         self.seg_split.set("1")
         self.seg_split.pack(fill="x")
+        # Tooltip after widget creation (#2) — was incorrectly placed before in prior version
+        tooltip(self.seg_split, "Split each source page into 1, 2, or 4 output pages", self.fonts)
         self._build_same_size_row(body)
         self._build_keep_ratio_row(body)
 
@@ -230,6 +251,7 @@ class LeftPanel:
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_same_size(bool(self._same_size_var.get()))))
         self.switch_same_size.pack(side="left")
+        tooltip(self.switch_same_size, "Keep all split windows the same dimensions", self.fonts)
 
     def _build_keep_ratio_row(self, parent: ctk.CTkBaseClass) -> None:
         self.keep_ratio_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -240,10 +262,12 @@ class LeftPanel:
             self.keep_ratio_row, text="", variable=self._keep_ratio_var, font=self.fonts.base,
             command=self._on_keep_ratio_toggle)
         self.switch_keep_ratio.pack(side="left")
+        tooltip(self.switch_keep_ratio, "Lock crop height to width ÷ ratio", self.fonts)
         self.entry_ratio = ctk.CTkEntry(self.keep_ratio_row, width=70, font=self.fonts.base)
         self.entry_ratio.pack(side="left", padx=(6, 0))
         self.entry_ratio.bind("<Return>", self._commit_ratio)
         self.entry_ratio.bind("<FocusOut>", self._commit_ratio)
+        tooltip(self.entry_ratio, "Aspect ratio (width / height); editable", self.fonts)
         self.keep_ratio_row.pack(fill="x", pady=(6, 0))
 
     def _on_keep_ratio_toggle(self) -> None:
@@ -267,12 +291,17 @@ class LeftPanel:
         m = self.model
         new_split = str(m.split_count) if m.split_count in (1, 2, 4) else "1"
         if self.seg_split.get() != new_split:
+            # Suppress command= during programmatic set to prevent re-entrant dispatch (#14)
+            self.seg_split.configure(command=None)
             self.seg_split.set(new_split)
+            self.seg_split.configure(
+                command=lambda v: self._cb.dispatch(lambda: self.model.set_split(int(v))))
         _set_visible(self.same_size_row, m.split_count in (2, 4), fill="x", pady=(6, 0),
                      before=self.keep_ratio_row)
         self._same_size_var.set(m.same_size)
         self._keep_ratio_var.set(m.keep_ratio)
-        set_entry_text(self.entry_ratio, f"{m.ratio:.3f}" if m.ratio else "")
+        ratio_val = m.ratio if m.ratio is not None else m.default_ratio
+        set_entry_text(self.entry_ratio, f"{ratio_val:.3f}" if ratio_val else "")
         _set_state((self.seg_split, self.switch_same_size, self.switch_keep_ratio,
                     self.entry_ratio), not busy)
 
@@ -281,10 +310,11 @@ class LeftPanel:
         outer, body = card(self.scroll, "Detect Text Borders", self.fonts)
         outer.pack(fill="x", pady=(0, 10))
         self.btn_detect = highlight_button(
-            body, "✶  Auto-detect",
+            body, "✦  Auto-detect",
             lambda: self._cb.dispatch_job(self.model.detect_content), self.fonts)
         self.btn_detect.pack(fill="x")
-        tooltip(self.btn_detect, "Detect each page's content box over the Pages selection")
+        tooltip(self.btn_detect, "Detect each page's content box over the Pages selection",
+                self.fonts)
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(6, 0))
         self._anchor_left_var = tk.BooleanVar(value=self.model.anchor_left)
@@ -294,6 +324,8 @@ class LeftPanel:
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_anchor(left=bool(self._anchor_left_var.get()))))
         self.switch_anchor_left.pack(side="left", padx=(0, 16))
+        tooltip(self.switch_anchor_left, "Pin the left crop edge to each page's own content",
+                self.fonts)
         self._anchor_top_var = tk.BooleanVar(value=self.model.anchor_top)
         self.switch_anchor_top = ctk.CTkSwitch(
             row, text="Anchor Top", variable=self._anchor_top_var,
@@ -301,6 +333,8 @@ class LeftPanel:
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_anchor(top=bool(self._anchor_top_var.get()))))
         self.switch_anchor_top.pack(side="left")
+        tooltip(self.switch_anchor_top, "Pin the top crop edge to each page's own content",
+                self.fonts)
 
     def _refresh_detect(self, busy: bool) -> None:
         m = self.model
@@ -316,10 +350,11 @@ class LeftPanel:
                               border_color=THEMES["card_border"], corner_radius=10)
         outer.pack(fill="x", pady=(0, 10))
         self.btn_advanced = ctk.CTkButton(
-            outer, text="▸ Advanced", anchor="w", font=self.fonts.bold,
+            outer, text="▶ Advanced", anchor="w", font=self.fonts.bold,
             fg_color="transparent", hover_color=THEMES["secondary_hover"],
             text_color=THEMES["secondary_text"], command=self._toggle_advanced)
         self.btn_advanced.pack(fill="x", padx=12, pady=(10, 2))
+        tooltip(self.btn_advanced, "Fine-tune crop edges by percentage offset", self.fonts)
         self.advanced_body = ctk.CTkFrame(outer, fg_color="transparent")
         ctk.CTkLabel(self.advanced_body, text="Set offsets", anchor="w",
                      text_color=THEMES["muted"],
@@ -328,9 +363,9 @@ class LeftPanel:
         offsets_row.pack(fill="x")
         self.offset_entries: dict[str, ctk.CTkEntry] = {}
         edges: tuple[Literal["L", "T", "R", "B"], ...] = ("L", "T", "R", "B")
-        for edge in edges:
+        for i, edge in enumerate(edges):
             frame, entry = self._build_offset_spinner(offsets_row, edge)
-            frame.pack(side="left", padx=(0, 8))
+            frame.pack(side="left", padx=(0, 3) if i < 3 else 0)
             self.offset_entries[edge] = entry
 
     def _build_offset_spinner(
@@ -345,11 +380,14 @@ class LeftPanel:
                 self.model.commit_offsets()
             self._cb.dispatch(_do)
 
-        return offset_spinner(parent, edge, start, _commit, self.fonts)
+        frame, entry = offset_spinner(parent, edge, start, _commit, self.fonts)
+        tooltip(entry, f"{field.capitalize()} offset — positive shrinks, negative expands (%)",
+                self.fonts)
+        return frame, entry
 
     def _toggle_advanced(self) -> None:
         self.advanced_open = not self.advanced_open
-        arrow = "▾" if self.advanced_open else "▸"
+        arrow = "▼" if self.advanced_open else "▶"
         self.btn_advanced.configure(text=f"{arrow} Advanced")
         _set_visible(self.advanced_body, self.advanced_open, fill="x", padx=12, pady=(0, 12))
 
@@ -367,37 +405,45 @@ class LeftPanel:
             body, "✂  Crop",
             lambda: self._cb.dispatch(self.model.apply_crop), self.fonts)
         self.btn_crop.pack(fill="x")
-        tooltip(self.btn_crop, "Commit and show the crop (Ctrl+Enter)")
+        tooltip(self.btn_crop, "Commit and show the crop (Ctrl+Enter)", self.fonts)
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(6, 0))
         self.btn_rotate = highlight_button(
             row, "↻  Rotate",
             lambda: self._cb.dispatch(self.model.rotate_pages), self.fonts)
         self.btn_rotate.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        tooltip(self.btn_rotate, "Rotate the Pages selection 90° CW")
+        tooltip(self.btn_rotate, "Rotate the Pages selection 90° CW", self.fonts)
         self.btn_delete = highlight_button(
             row, "🗑  Delete", self._cb.on_delete, self.fonts)
         self.btn_delete.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        tooltip(self.btn_delete, "Delete the Pages selection")
+        tooltip(self.btn_delete, "Delete the Pages selection", self.fonts)
 
     def _refresh_actions(self, busy: bool) -> None:
         m = self.model
+        self.btn_crop.configure(text="✂  Split & Crop" if m.split_count in (2, 4) else "✂  Crop")
         self.btn_crop.configure(state="normal" if (m.can_apply and not busy) else "disabled")
         enabled = m.has_document and not busy
         _set_state((self.btn_rotate, self.btn_delete), enabled)
 
-    # ── Compress Document (§7.6) ──────────────────────────────────────────────
+    # ── Output Quality (§7.6) ─────────────────────────────────────────────────
     def _build_compress(self) -> None:
-        outer, body = card(self.scroll, "Compress Document", self.fonts)
+        outer, body = card(self.scroll, "Output Quality", self.fonts)
         outer.pack(fill="x", pady=(0, 10))
+        row = labeled_row(body, "Compress to", self.fonts)
         self.menu_compress = option_menu(
-            body, self.fonts, values=list(DPI_PRESETS),
+            row, self.fonts, values=list(DPI_PRESETS), width=140,
             command=lambda v: self._cb.dispatch(lambda: self.model.set_compress_preset(v)))
-        self.menu_compress.pack(fill="x")
+        self.menu_compress.pack(side="right")
+        tooltip(self.menu_compress, "Resample output to a target DPI — reduces file size",
+                self.fonts)
+        row.pack(fill="x", pady=4)
+        row = labeled_row(body, "Colour", self.fonts)
         self.menu_colours = option_menu(
-            body, self.fonts, values=COLOUR_MODES,
+            row, self.fonts, values=COLOUR_MODES, width=140,
             command=lambda v: self._cb.dispatch(lambda: self.model.set_output_colours(v)))
-        self.menu_colours.pack(fill="x", pady=(6, 0))
+        self.menu_colours.pack(side="right")
+        tooltip(self.menu_colours, "Output colour space: Original or Grayscale", self.fonts)
+        row.pack(fill="x", pady=4)
 
     def _refresh_compress(self, busy: bool) -> None:
         m = self.model
@@ -409,19 +455,24 @@ class LeftPanel:
     def _build_export(self) -> None:
         outer, body = card(self.scroll, "Export", self.fonts)
         outer.pack(fill="x")
-        self.export_frame, self.btn_export = export_split_button(
+        self.export_frame, self.btn_export, self.menu_format = export_split_button(
             body, self.model.export_format, self.fonts, self._cb.on_export,
             self._cb.on_pick_format)
         self.export_frame.pack(fill="x")
+        tooltip(self.btn_export, "Export in the chosen format (Ctrl+S)", self.fonts)
 
     def _refresh_export(self, busy: bool) -> None:
         m = self.model
         self.btn_export.configure(text=f"💾  Export {m.export_format}")
-        update_export_fmt_btn(self.export_frame, m.export_format)
+        self.menu_format.set(m.export_format)
         enabled = m.has_document and not busy
-        _set_state((self.btn_export,), enabled)
+        _set_state((self.btn_export, self.menu_format), enabled)
 
     # ── aggregate refresh (ARCHITECTURE §3: AppWindow.refresh_all -> panel.refresh) ──────────
+    def refresh_pages(self, busy: bool) -> None:
+        """Fast-path for navigation: only the pages section tracks current page position."""
+        self._refresh_pages(busy)
+
     def refresh(self, busy: bool) -> None:
         self._refresh_document(busy)
         self._refresh_pages(busy)
