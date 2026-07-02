@@ -273,7 +273,8 @@ class LeftPanel:
         self.entry_ratio.pack(side="left", padx=(6, 0))
         self.entry_ratio.bind("<Return>", self._commit_ratio)
         self.entry_ratio.bind("<FocusOut>", self._commit_ratio)
-        tooltip(self.entry_ratio, "Aspect ratio (width / height); editable", self.fonts)
+        tooltip(self.entry_ratio,
+                "Width / height; follows detect or your drawn window — editable", self.fonts)
         self.keep_ratio_row.pack(fill="x", pady=(6, 0))
 
     def _on_keep_ratio_toggle(self) -> None:
@@ -411,7 +412,8 @@ class LeftPanel:
             body, "✂  Crop",
             lambda: self._cb.dispatch(self.model.apply_crop), self.fonts)
         self.btn_crop.pack(fill="x")
-        tooltip(self.btn_crop, "Commit and show the crop (Ctrl+Enter)", self.fonts)
+        tooltip(self.btn_crop,
+                "Commit the crop window to the Pages selection (Ctrl+Enter)", self.fonts)
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(6, 0))
         self.btn_rotate = highlight_button(

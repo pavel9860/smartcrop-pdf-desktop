@@ -3,6 +3,8 @@ core is Tk-free, ARCHITECTURE §2/§5.2). Mirror the spec exactly; no magic numb
 """
 from __future__ import annotations
 
+APP_VERSION = "0.9.1"    # shown in Help → About (§16, inv 36); keep in sync with pyproject.toml
+
 # ── crop handle hit-test / drawing (page-unit tol = (HANDLE_R + HANDLE_SLACK) / scale) ───────
 HANDLE_R = 6
 HANDLE_SLACK = 6
@@ -26,7 +28,12 @@ SCALE_THROTTLE_MS = 80
 
 # ── canvas paint (§17 preview lever, §19 status) ──────────────────────────────────────────────
 PHOTO_CACHE = 6          # fitted page bitmaps kept resident — nav/drag skips the resample
-STATUS_PAD = 8           # position text inset from the page image's bottom-left corner (px)
+STATUS_PAD = 8           # position/coords text inset from the page image's corners (px)
+
+# ── hover nav arrows on the canvas edges (§6, inv 34) ─────────────────────────────────────────
+NAV_ARROW_W = 38         # ◀ / ▶ button width
+NAV_ARROW_H = 64         # ◀ / ▶ button height
+NAV_ARROW_PAD = 10       # inset from the canvas edge
 
 # ── compact control rows (§7.4, §7.4a) ────────────────────────────────────────────────────────
 OFFSET_FIELD_W = 48      # one-line L T R B offset entries — all four visible in the panel

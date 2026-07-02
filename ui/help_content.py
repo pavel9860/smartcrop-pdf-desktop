@@ -1,9 +1,12 @@
 """Static Help text (spec §16). One Contents button per section; clicking scrolls the body to it.
-Pure data — the help window (ui_build.py) renders this, it never reads the model.
+Pure data — the help window (ui_build.py) renders this, it never reads the model. The section
+list must always end with About (inv 36).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from ui.constants import APP_VERSION
 
 INTRO = "Crop, straighten, and clean PDFs and scans for e-readers, phones and tablets."
 
@@ -56,17 +59,21 @@ SECTIONS: tuple[HelpSection, ...] = (
         "Strength 1 is cautious, 2 is the normal default, 3 is aggressive.",
     ),
     HelpSection(
-        "5. Set the crop",
-        "The crop rectangle is shown on the canvas. You have three ways to set it. "
+        "5. Set the crop window",
+        "The crop window is shown on the canvas as a dashed rectangle with handles. "
+        "You have two ways to place it — both behave the same afterwards. "
         "\n\n"
-        "Auto-detect: press the button and SmartCrop finds the content on each selected page. "
-        "It builds one shared crop frame that fits all pages the same way. "
+        "Auto-detect: press the button and SmartCrop finds the content on each selected page, "
+        "building one shared crop frame that fits all pages the same way. "
         "\n\n"
-        "Draw: click and drag on an empty area of the canvas to draw a new rectangle. "
+        "Draw: click and drag on the page to draw the window yourself. It appears on every page, "
+        "replaces the auto frame while it exists, and nothing is cropped yet — the page never "
+        "zooms until you press Crop. "
         "\n\n"
-        "Adjust manually: drag a corner to resize, a border to move one edge, "
-        "or the marker at the top-right corner to move the whole rectangle. "
-        "Right-click or press Esc to cancel a drag without changing anything.",
+        "Adjust: drag a corner to resize, a border to move one edge, or the inside to move the "
+        "whole window. Esc or right-click during a drag cancels it; pressed again with no drag, "
+        "it removes the drawn window (and then deactivates the auto frame). "
+        "Press Crop to commit the window to the selected pages.",
     ),
     HelpSection(
         "6. Fine-tune with anchors and offsets",
@@ -92,15 +99,21 @@ SECTIONS: tuple[HelpSection, ...] = (
         "8. Keep ratio",
         "When Keep ratio is on, the crop height is always locked to width / ratio. "
         "This applies to every way you can change the crop: dragging handles, "
-        "editing offsets, drawing a new rectangle, and split windows. "
-        "The ratio field is editable. It defaults to the detected content width/height.",
+        "editing offsets, drawing a window, and split windows. "
+        "The ratio field is editable and follows what you do: it starts at the page ratio, "
+        "updates to the detected content after Auto-detect, and to your window after a draw — "
+        "so turning the lock on keeps exactly the shape you see.",
     ),
     HelpSection(
-        "9. Apply the crop",
-        "Press Apply (or Ctrl+Enter) to commit the crop to the selected pages. "
-        "The canvas immediately shows each page as it will be saved. "
-        "A committed page stays cropped while you continue editing other pages. "
-        "Only Undo or Reset returns it to the full page.",
+        "9. Crop (commit)",
+        "Press Crop (or Ctrl+Enter) to commit the current window — drawn or auto — to the "
+        "selected pages. The canvas then shows each page exactly as it will be saved. "
+        "Pages in the selection without any window are skipped, never blind-cropped. "
+        "A committed page stays cropped while you work on others; drawing on it places a new "
+        "window over the cropped view (still nothing moves until you press Crop again). "
+        "Only Undo or Reset returns a page to its full extent. "
+        "If the selection did not include the page you were viewing, the view jumps to the first "
+        "processed page so you can check the result.",
     ),
     HelpSection(
         "10. Rotate and delete",
@@ -151,9 +164,17 @@ SECTIONS: tuple[HelpSection, ...] = (
         "Left / Right  —  Previous / next page\n"
         "PgUp / PgDn  —  Previous / next page\n"
         "Mouse wheel on canvas  —  Previous / next page\n"
+        "◀ ▶ on the canvas edges (appear on hover)  —  Previous / next page\n"
         "Enter in page box  —  Jump to that page\n"
         "Ctrl + / −  —  Scale the UI\n"
         "Ctrl 0  —  Reset UI scale\n"
-        "Esc or right-click  —  Cancel drag",
+        "Esc or right-click  —  Cancel a drag; with none, remove the crop window",
+    ),
+    HelpSection(
+        "About",
+        f"SmartCrop PDF {APP_VERSION}\n"
+        "Crop, straighten, clean and compress PDFs and scans for comfortable reading "
+        "on e-readers, phones and tablets.\n\n"
+        "Built with Python, CustomTkinter, PyMuPDF, OpenCV and docuwarp.",
     ),
 )

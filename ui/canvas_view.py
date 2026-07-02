@@ -4,10 +4,11 @@ into page-unit coordinates for `AppModel.begin_drag/update_drag/end_drag/cancel_
 testing for cursor/clicks is the model's own (`core.geometry`, shared pure leaf) — this module
 owns only the canvas <-> page-unit coordinate mapping and event wiring, never gesture logic.
 
-The output-page position ("3 / 312") is drawn directly on the page image at its bottom-left
-corner (§6, §19) — position only, no coordinate read-out. The fitted page bitmap is cached per
-(raster, size) — `PHOTO_CACHE` entries — so page navigation and drag repaints skip the full-page
-resample (§17).
+Nothing is drawn over the page image (inv 32): the pointer's coordinates (percent of the page)
+show in a small label at the right pane's bottom-right corner and empty when the pointer leaves.
+Hover nav arrows appear at the canvas's edge midpoints and disable at the document's ends
+(inv 34, 37). The fitted page bitmap is cached per (raster, size) — `PHOTO_CACHE` entries — so
+page navigation and drag repaints skip the full-page resample (§17).
 """
 from __future__ import annotations
 
@@ -27,13 +28,13 @@ from ui.constants import (
     HANDLE_CURSOR,
     HANDLE_R,
     HANDLE_SLACK,
+    NAV_ARROW_H,
+    NAV_ARROW_PAD,
+    NAV_ARROW_W,
     PHOTO_CACHE,
     STATUS_PAD,
+    THEMES,
 )
-
-_STATUS_FONT = ("", CANVAS_STATUS_FONT_SIZE)
-_STATUS_FG = "#e8e8e8"
-_STATUS_SHADOW = "#000000"
 
 # cache key → (source image ref, PhotoImage); the ref pins the raster so Python can't recycle
 # its id() while the entry lives, making the id-based key collision-free.
@@ -55,7 +56,46 @@ class CanvasView:
         self._photo: ImageTk.PhotoImage | None = None
         self._photo_cache: OrderedDict[tuple[int, int, int], _PhotoEntry] = OrderedDict()
         self._snap: ViewSnapshot | None = None
+        self._build_nav_arrows(parent)
+        # Cursor read-out: bottom-right corner of the right pane — white, shared status font,
+        # never drawn on the page image itself (§6, §19, inv 32).
+        self.coords_label = ctk.CTkLabel(parent, text="", text_color="#FFFFFF",
+                                         fg_color="transparent",
+                                         font=ctk.CTkFont(size=CANVAS_STATUS_FONT_SIZE))
+        self.coords_label.place(relx=1.0, rely=1.0, x=-STATUS_PAD, y=-STATUS_PAD, anchor="se")
         self._bind_events()
+
+    def _build_nav_arrows(self, parent: ctk.CTkBaseClass) -> None:
+        """Hover ◀/▶ at the canvas edge midpoints — same styling as the bottom nav (inv 34)."""
+        def arrow(text: str, cmd: Callable[[], None]) -> ctk.CTkButton:
+            return ctk.CTkButton(parent, text=text, command=cmd, width=NAV_ARROW_W,
+                                 height=NAV_ARROW_H, fg_color=THEMES["secondary"],
+                                 hover_color=THEMES["secondary_hover"],
+                                 text_color=THEMES["secondary_text"])
+        self.btn_arrow_prev = arrow("◀", lambda: self._arrow_nav(self.model.prev_page))
+        self.btn_arrow_next = arrow("▶", lambda: self._arrow_nav(self.model.next_page))
+
+    def set_arrow_states(self, prev_disabled: bool, next_disabled: bool) -> None:
+        """Disable each arrow at its end of the document, like the bottom nav (inv 37)."""
+        self.btn_arrow_prev.configure(state="disabled" if prev_disabled else "normal")
+        self.btn_arrow_next.configure(state="disabled" if next_disabled else "normal")
+
+    def _arrow_nav(self, command: Callable[[], None]) -> None:
+        command()
+        self._on_nav()
+
+    def _show_arrows(self, _event: object = None) -> None:
+        self.btn_arrow_prev.place(relx=0.0, rely=0.5, x=NAV_ARROW_PAD, anchor="w")
+        self.btn_arrow_next.place(relx=1.0, rely=0.5, x=-NAV_ARROW_PAD, anchor="e")
+
+    def _hide_arrows(self, _event: object = None) -> None:
+        holder = self.canvas.master
+        px, py = holder.winfo_pointerxy()
+        inside = (holder.winfo_rootx() <= px < holder.winfo_rootx() + holder.winfo_width()
+                  and holder.winfo_rooty() <= py < holder.winfo_rooty() + holder.winfo_height())
+        if not inside:                           # ignore Leave events caused by the arrows
+            self.btn_arrow_prev.place_forget()
+            self.btn_arrow_next.place_forget()
 
     def _bind_events(self) -> None:
         self.canvas.bind("<Configure>", lambda _e: self.redraw())
@@ -64,6 +104,8 @@ class CanvasView:
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<Button-3>", self._right_click)
         self.canvas.bind("<Motion>", self._motion)
+        self.canvas.bind("<Leave>", self._pointer_left)
+        self.canvas.bind("<Enter>", self._show_arrows)
         self.canvas.bind("<MouseWheel>", self._wheel)
         self.canvas.bind("<Button-4>", self._wheel_prev)
         self.canvas.bind("<Button-5>", self._wheel_next)
@@ -82,7 +124,6 @@ class CanvasView:
         self._photo = self._fitted_photo(snap.image, iw, ih)
         self.canvas.create_image(self._img_x, self._img_y, anchor="nw", image=self._photo)
         overlay.draw_overlay(self.canvas, snap.overlay, snap.draw_rect, self._to_canvas)
-        self._draw_status(snap.status)
         return snap
 
     def _fitted_photo(self, image: Image.Image, iw: int, ih: int) -> ImageTk.PhotoImage:
@@ -99,18 +140,6 @@ class CanvasView:
         while len(self._photo_cache) > PHOTO_CACHE:
             self._photo_cache.popitem(last=False)
         return photo
-
-    def _draw_status(self, text: str) -> None:
-        """Position text at the page image's bottom-left corner (§6, §19)."""
-        if not text:
-            return
-        ih = max(1, round((self._snap.page_h if self._snap else 1) * self._scale))
-        x = self._img_x + STATUS_PAD
-        y = self._img_y + ih - STATUS_PAD
-        self.canvas.create_text(x + 1, y + 1, text=text, anchor="sw",
-                                fill=_STATUS_SHADOW, font=_STATUS_FONT, tags="status")
-        self.canvas.create_text(x, y, text=text, anchor="sw",
-                                fill=_STATUS_FG, font=_STATUS_FONT, tags="status")
 
     # ── coordinate mapping ────────────────────────────────────────────────────────────────────
     def _to_page(self, cx: float, cy: float) -> tuple[float, float]:
@@ -158,13 +187,27 @@ class CanvasView:
         self.model.next_page()
         self._on_nav()
 
-    # ── hover: cursor maps to the action (§9.5) ─────────────────────────────────────────────
+    # ── hover: cursor maps to the action (§9.5); coords read-out bottom-right (§6, inv 32) ──
     def _motion(self, event: tk.Event[tk.Misc]) -> None:
         snap = self._snap
         if snap is None:
             return
         px, py = self._to_page(event.x, event.y)
         self._update_cursor(snap, px, py)
+        self._update_coords(snap, px, py)
+
+    def _update_coords(self, snap: ViewSnapshot, px: float, py: float) -> None:
+        if snap.page_w <= 0 or not (0 <= px <= snap.page_w and 0 <= py <= snap.page_h):
+            text = ""                            # pointer off the page → empty read-out
+        else:
+            text = f"x {px / snap.page_w * 100.0:.1f}%  y {py / snap.page_h * 100.0:.1f}%"
+        if self.coords_label.cget("text") != text:
+            self.coords_label.configure(text=text)
+
+    def _pointer_left(self, event: tk.Event[tk.Misc]) -> None:
+        if self.coords_label.cget("text"):
+            self.coords_label.configure(text="")
+        self._hide_arrows(event)
 
     def _update_cursor(self, snap: ViewSnapshot, px: float, py: float) -> None:
         tol = self._tol()

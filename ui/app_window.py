@@ -187,6 +187,9 @@ class SmartCropApp:
         result = job.result()
         if isinstance(result, Failed):
             messagebox.showerror(type(result.error).__name__, str(result.error))
+        notice = self.model.take_dewarp_notice()
+        if notice:                             # a silent fallback looks like a dead button (§10.1)
+            messagebox.showwarning("Dewarp & Deskew", notice)
         self.refresh_all()
 
     def _cancel_job(self) -> None:
@@ -215,8 +218,12 @@ class SmartCropApp:
                                  else "disabled")
         self.btn_redo.configure(state="normal" if (self.model.can_redo and not busy)
                                  else "disabled")
-        for w in (self.btn_reset, self.btn_settings, self.btn_help, self.btn_prev,
-                  self.btn_next, self.entry_page):
+        at_start = snap.position <= 1           # bounds disable Prev/Next + arrows (inv 37);
+        at_end = snap.position >= snap.total    # runs on every navigation path via this refresh
+        self.btn_prev.configure(state="disabled" if (busy or at_start) else "normal")
+        self.btn_next.configure(state="disabled" if (busy or at_end) else "normal")
+        self.canvas_view.set_arrow_states(busy or at_start, busy or at_end)
+        for w in (self.btn_reset, self.btn_settings, self.btn_help, self.entry_page):
             w.configure(state="disabled" if busy else "normal")
 
     def _jump_to_page(self, _event: object = None) -> None:

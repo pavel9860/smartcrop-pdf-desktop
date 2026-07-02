@@ -8,3 +8,4 @@ scikit-image>=0.22
 docuwarp
 onnxruntime>=1.17
 # tkinter ships with CPython on Windows/macOS; on Linux: apt install python3-tk
+customtkinter==6.0.0    # exact pin: geometry timing differs across 5.x/6.x

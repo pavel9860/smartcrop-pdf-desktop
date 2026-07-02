@@ -152,6 +152,89 @@ def test_rotate_turns_drawn_window_with_the_page(model):
     assert win.height == pytest.approx(200)       # old width span
 
 
+def test_new_box_resets_offsets(model, run_job):
+    run_job(model.detect_content())
+    model.set_offset("L", 7.0)
+    model.set_offset("B", -3.0)
+    run_job(model.detect_content())               # inv 35: a fresh detection starts clean
+    assert model.offsets == type(model.offsets)()
+    model.set_offset("R", 5.0)
+    model.begin_drag(2, 2, tol=3.0)               # outside the auto box → a fresh drawn window
+    model.update_drag(102, 202)                   # …which starts clean too
+    model.end_drag()
+    assert model.offsets == type(model.offsets)()
+
+
+def test_detect_replaces_drawn_window_immediately(model, run_job):
+    model.begin_drag(50, 50, tol=3.0)
+    model.update_drag(250, 550)
+    model.end_drag()
+    assert _box(model, 0).x0 == pytest.approx(50)   # drawn window active
+    run_job(model.detect_content())               # inv 13: detect drops it on the spot
+    box = _box(model, 0)
+    assert box is not None and box.x0 != pytest.approx(50)   # the fresh auto frame renders
+    model.cancel_drag()                           # first Esc now deactivates auto (nothing drawn)
+    assert model.view_snapshot().overlay == ()
+
+
+def test_detect_after_rotation_equals_rotation_after_detect(loaded, run_job):
+    m = loaded(1)
+    run_job(m.detect_content())
+    w1, h1 = m.view_snapshot().page_w, m.view_snapshot().page_h   # unrotated page dims
+    m.rotate_pages()                              # rotates the cached box (inv 29 first half)
+    rotated_cached = m.view_snapshot().overlay[0].box
+    run_job(m.detect_content())                   # inv 29 second half: detector maps into the
+    redetected = m.view_snapshot().overlay[0].box  # rotated page space itself
+    for a, b in zip((redetected.x0, redetected.y0, redetected.x1, redetected.y1),
+                    (rotated_cached.x0, rotated_cached.y0, rotated_cached.x1, rotated_cached.y1)):
+        assert a == pytest.approx(b, abs=1.5)
+    snap = m.view_snapshot()
+    assert snap.page_w == pytest.approx(h1) and snap.page_h == pytest.approx(w1)
+    assert 0 <= redetected.x0 <= redetected.x1 <= snap.page_w + 1e-6
+    assert 0 <= redetected.y0 <= redetected.y1 <= snap.page_h + 1e-6
+
+
+def test_ratio_field_follows_the_drawn_window(model):
+    model.begin_drag(50, 50, tol=3.0)
+    model.update_drag(250, 150)                   # 200×100 → ratio 2.0
+    model.end_drag()
+    assert model.ratio == pytest.approx(2.0)      # §7.4: the field follows the drawn box
+    model.set_keep_ratio(True, model.ratio)       # locking afterwards keeps the drawn shape
+    win = model.view_snapshot().overlay[0].box
+    assert win.width / win.height == pytest.approx(2.0, abs=0.02)
+
+
+def test_batch_lands_on_first_processed_page(model, run_job, select):
+    select(model, "5-8")
+    run_job(model.detect_content())               # inv 33: jump to the selection's first page
+    assert model.current_page == 4
+    model.current_page = 0
+    model.apply_crop()                            # Crop over 5-8 while viewing page 1
+    assert model.current_page == 4                # landed on the first committed page
+    model.current_page = 4                        # already inside the selection …
+    select(model, "5-6")
+    run_job(model.detect_content())
+    assert model.current_page == 4                # … → no jump
+
+
+def test_dewarp_fallback_is_reported_once(scanned, run_job, monkeypatch):
+    m = scanned(1)
+
+    def boom(_bgr, _factor):
+        raise RuntimeError("onnx exploded")
+
+    monkeypatch.setattr("core.imaging.unwarp_supersampled", boom)
+    monkeypatch.setattr("core.imaging.unwarp_available", lambda: True)
+    assert run_job(m.run_dewarp()).__class__.__name__ == "Ok"   # batch survives (inv 30)
+    notice = m.take_dewarp_notice()
+    assert notice is not None and "deskew" in notice
+    assert m.take_dewarp_notice() is None          # read-once
+
+
+def test_dewarp_supersample_defaults_off(model):
+    assert model.settings.dewarp_supersample == 1.0
+
+
 def test_rotate_relayouts_split_windows(model):
     model.set_split(2)
     model.set_same_size(False)
@@ -172,14 +255,16 @@ def test_rotate_relayouts_split_windows(model):
 def test_redetect_refreshes_committed_crop_keeps_it(model, run_job, select):
     select(model, "1")
     run_job(model.detect_content())
+    model.set_offset("R", 12.0)               # widen the live crop before committing
     model.apply_crop()
     assert _committed(model, 0)
-    before = model.view_snapshot().page_w     # committed → page_w is the crop width
+    widened = model.view_snapshot().page_w    # committed → page_w is the crop width
     model.current_page = 0
-    model.set_offset("R", 12.0)
     run_job(model.detect_content())           # re-detect the same page
     assert _committed(model, 0)               # inv 16: kept committed, not dropped
-    assert model.view_snapshot().page_w != before     # and refreshed to the new crop
+    # inv 35: the fresh detection starts clean, so the refreshed crop loses the +12% offset
+    assert model.view_snapshot().page_w < widened
+    assert model.offsets == type(model.offsets)()
 
 
 def test_redetect_keeps_crops_outside_selection(model, run_job, select):

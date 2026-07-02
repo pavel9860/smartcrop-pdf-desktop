@@ -120,9 +120,9 @@ default, its four offset fields on **one packed line**, each `OFFSET_FIELD_W` wi
 the panel (§7.4a); the Keep-ratio row is compact (`ROW_LABEL_W`/`SWITCH_W`) so the ratio field
 gets `RATIO_FIELD_W` (§7.4); Actions card precedes Compress (§6); Scan card only in scanned mode.
 
-Canvas: the position text ("3 / 24", split annotation when relevant — no `page` prefix, no
-coordinates) is drawn at the **bottom-left of the page image**, anchor `sw` (§6, §19); redraw
-reuses the fitted-photo cache for an unchanged page and drops it on navigation (§17).
+Canvas: no text items are drawn over the page image (inv 32); redraw reuses the fitted-photo
+cache for an unchanged page and drops it on navigation (§17); hover arrows appear on canvas
+enter, hide on leave, navigate one output page, and disable at the ends (inv 34, 37).
 
 Controls: Crop disabled until a detection or a drawn window exists, enabled by either (§7.7);
 Auto-detect never highlights (§19); glyph-led labels end with the control's name (inv 23);
@@ -132,8 +132,26 @@ Shortcuts (§21): every sequence in the spec table has a Tk binding **and** its 
 Ctrl+O opens the load dialog, Ctrl+S the export dialog, Ctrl+Enter applies, arrows navigate
 unless an entry has focus, Esc cancels/drops via the canvas.
 
-Windows: Settings and Help open aligned to the main window's top-left corner; Help matches the
-main window's height (inv 31); Settings builds at `FONT_SIZE_MAX` without clipping (§15).
+Windows: Settings and Help open aligned to the main window's top-left corner; Help's height is
+computed after `update_idletasks()` and its bottom edge never passes the main window's (inv 31 —
+geometry asserted post-layout; where a headless WM makes the assertion untrustworthy, the check
+is a screenshot read, not a skipped test); Help's Contents ends with an About section carrying
+the app name and version (inv 36); Settings builds at `FONT_SIZE_MAX` without clipping (§15).
+
+New-box hygiene (inv 35): after offsets are edited, running Auto-detect or drawing a window
+resets all four offset fields to 0.0 and the new box renders immediately — a detect pressed while
+a drawn window exists replaces it in the same snapshot (inv 13).
+
+Rotation × detection (inv 29): rotate a text page 90°, run detect — the cached box equals the
+rotation of the box detected on the unrotated page (and stays inside the rotated page), for 90/
+180/270.
+
+Navigation bounds (inv 37): on page 1 Prev (and ◀) report `disabled`, Next normal; on the last
+output page the reverse; a 1-page document disables both; the states hold after each path —
+button click, wheel handler, shortcut action, jump-box entry.
+
+Cursor read-out (inv 32): the pane-corner label fills with `x nn.n%  y nn.n%` on motion over the
+page, empties on leave, and nothing is drawn on the page image itself (no canvas text items).
 
 ## 4. Conventions
 

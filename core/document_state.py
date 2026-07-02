@@ -38,7 +38,7 @@ class PageProcessIntent:
 @dataclass
 class DocumentState:
     applied: dict[int, list[Box]] = field(default_factory=dict)      # committed crop(s) per page
-    drawn: dict[int, Box] = field(default_factory=dict)             # live drawn crop window (§9.4)
+    drawn: Box | None = None            # the one global live drawn crop window (§9.4)
     crop_rects: list[Box] = field(default_factory=list)             # live split rectangles
     rotation: dict[int, int] = field(default_factory=dict)          # page → degrees CW
     processed: dict[int, PageProcessIntent] = field(default_factory=dict)
@@ -54,7 +54,7 @@ class DocumentState:
         """An undo copy: deep-copy the per-page maps/lists, share the frozen scalars."""
         return DocumentState(
             applied={i: list(v) for i, v in self.applied.items()},
-            drawn=dict(self.drawn),
+            drawn=self.drawn,
             crop_rects=list(self.crop_rects),
             rotation=dict(self.rotation),
             processed=dict(self.processed),

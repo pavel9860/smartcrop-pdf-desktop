@@ -218,9 +218,15 @@ Two panes split by a draggable sash. **Left** = a scrollable control stack, plus
 Settings/Help + history + page-nav card **pinned to the bottom of the panel, outside the scroll
 area** (packed `side="bottom"`): always visible, never a floating duplicate under Export, never
 needing a scroll to reach. The panel keeps a fixed width (`pack\_propagate(False)`). **Right** = the
-page canvas with a centred inline progress overlay (§14); the **output-page position** (`n / total`,
-plus the split annotation of §12.3 when one applies) is drawn **directly on the page image at its
-bottom-left corner** (§19) — position only, no coordinate read-out, no separate strip or field.
+page canvas with a centred inline progress overlay (§14). **No text is drawn on the page image
+itself** — the output-page position lives in the pinned nav bar (§7.8) only. While the pointer is
+over the page, its **coordinates** (`x nn.n%  y nn.n%`, percent of the page) show in a small
+read-out label **at the bottom-right corner of the right pane** (white text, the shared status
+font, §19); it empties when the pointer leaves the page. **Hover nav arrows**: while the pointer
+is over the canvas, a `◀` / `▶` button pair appears at the vertical middle of the canvas's left
+and right edges (same styling as the bottom nav buttons, §7.8) and turns one output page per
+click; both hide when the pointer leaves the canvas, and each disables at its end of the document
+exactly like the bottom nav buttons (§7.8).
 Scanned-only sections pack/unpack with no residual gap.
 
 Card order, top → bottom: **Document \& State**, **Pages to Process** (the page-scope selector),
@@ -275,9 +281,9 @@ Reset**, then the page nav.
 | \[ pinned, outside the scroll --|                                              |
 | \[ (\*) Settings ] \[ (\*)Help   ] |                                              |
 | \[ ↩ Undo ]\[ ↪ Redo ]\[ ⟲ Reset]|                                             |  3 equal buttons (§7.8)
-| \[ < ]  \[ 3 ] / 312  \[ > ]     | 3 / 312      ← position drawn on the page     |
+| \[ < ]  \[ 3 ] / 312  \[ > ]     |                x 34.2%  y 12.7% ← pane corner |
 + -------------------------------+----------------------------------------------+
-|                                 | image at its bottom-left corner (§6, §19)      |
+|                                 | (cursor read-out, bottom-right of the pane)    |
 ```
 
 
@@ -364,6 +370,11 @@ crop — detection takes visible effect after a crop **without dropping it** (th
 only its box updates; undoable). Pages **outside** the current selection keep their crops, so you
 can crop one page-set with one pattern and another set with another (§9, §12).
 
+**A new box always starts clean (inv 35).** Detect and draw both route through the same
+set-active-box semantics: the press/release **drops whatever live window was active** — Auto-detect
+immediately replaces a drawn window (never waiting for a manual Esc, §9.4) — and **resets the four
+offsets to 0** before the new box appears, so no stale offset warps a fresh detection or drawing.
+
 ### 7.4a Advanced — offsets *(collapsible; split = 1)*
 
 The per-edge offsets live in their own **Advanced** card, **separate from Detect Text Borders** and
@@ -429,8 +440,10 @@ equal buttons — Undo/redo cover dewarp, filter, crop, rotate at the Undo/redo-
 `Redo ↪`); then page nav `< \[ n ] / total >` — arrows hug the edges, the page box takes the middle
 so current/total stay visible up to four digits. `total` is the **output**-page count (committed
 splits expand to N each, §12), so navigation walks every split in order and the page count always
-matches what nav shows. Pinned at the bottom of the panel, outside the scroll area (one instance
-only).
+matches what nav shows. **Prev disables on the first output page, Next on the last (both on a
+one-page document), and the states refresh on every navigation path** — buttons, hover arrows,
+wheel, keyboard, and the jump box (inv 37). Pinned at the bottom of the panel, outside the scroll
+area (one instance only).
 
 \---
 
@@ -472,6 +485,11 @@ box        = bounding rectangle of the kept pixels
 
 Detection is non-destructive and deterministic; it is always safe to re-run.
 
+**Rotation-aware mapping.** Detection always returns boxes **in the rotated page's coordinate
+space**: the scanned path reads the already-rotated work raster; the native path reads the
+document's text blocks (unrotated) and rotates the resulting box by the page's current rotation
+before caching it. Detecting after a rotation therefore equals rotating after a detection (inv 29).
+
 \---
 
 ## 9\. Crop windows \& drag
@@ -488,11 +506,13 @@ anchors + offsets. Exists only when **split = 1**, auto-detect is active, and >=
 Drawn on the page as a dashed frame with **corner handles** (resize) and **border handles** (move
 one edge). Dragging inside the rectangle (away from handles) moves the whole box.
 It is **global**: the four offsets are shared, so editing it changes the live crop on every page.
-2. **Drawn crop window** — `drawn\[page]`, the per-page rectangle you **rubber-band by mouse** at
-split = 1 (§9.4). It is a **live window, not a commit**: shown as the same dashed frame with
-handles, directly movable/resizable, and it **overrides the live auto crop on its page** (the
-auto frame stays global on the others). `Esc` / right-click (outside a drag) **drops it** (§9.4);
-**Crop** commits it. It rotates with its page.
+2. **Drawn crop window** — `drawn`, the **one** rectangle you **rubber-band by mouse** at
+split = 1 (§9.4). It behaves **exactly like the Auto-detect frame — the only difference is that
+its position and size come from the mouse**: it is global (shown on **every** uncommitted page,
+clamped to each page's extent), a **live window, not a commit** — the same dashed frame with
+handles, movable/resizable — and while it exists it **overrides the live auto crop everywhere**.
+`Esc` / right-click (outside a drag) **drops it** (§9.4); **Crop commits it over the Pages
+selection**. It rotates with the pages.
 3. **Committed crop** — `applied\[page]`, a per-page list of one box (single) or N boxes (split).
 Set by **Apply/Crop**, or **refreshed by re-detect** (§7.4). It is the **saved state**, covered by
 Undo. A committed page is shown **exactly as it will be saved** (§12.1) — a single crop as the
@@ -538,12 +558,14 @@ on its own. **Undo** or **Reset** is the only way back to the full extent. The g
 |a **border** line|move just that edge|
 |a **corner**|resize (moves the two edges meeting at that corner)|
 |**inside** the rectangle (away from handles)|move the whole rectangle|
-|**empty area**|rubber-band a **new drawn window** (§9.4 — replaces the page's current window; **the view scale never changes**: the page stays full-size until Crop commits)|
+|**empty area**|rubber-band a **new drawn window** (§9.4 — replaces the current window and overrides the auto frame; **the view scale never changes**: the page stays full-size until Crop commits)|
 |**Esc** / **right-click** during a drag|**cancel** — discard the in-progress drag, commit nothing, take no history snapshot; the crop is left exactly as before the drag|
-|**Esc** / **right-click**, no drag in progress|**drop the page's drawn window** if it has one (the live auto crop, if active, shows again); with no drawn window, nothing changes|
+|**Esc** / **right-click**, no drag in progress|**drop the current live window**: the drawn window if one exists, **else deactivate the Auto-detect frame** (detection results stay cached; pressing Auto-detect re-activates them). With neither, nothing changes|
 
-On a **committed** page the one gesture is drawing: a rubber-banded rectangle **re-commits the shown
-output box tightened** to it (undoable); everything else does nothing (§9.5, §9.6).
+On a **committed** page (split = 1) the one gesture is drawing, and it works the same way: the
+rubber-band (in the shown output's coordinates, mapped back to page coordinates) becomes the
+**global drawn window** — shown over the cropped view with no zoom change — and **Crop**
+re-commits the selection through it (§9.4, §12.2). Everything else does nothing (§9.5).
 
 **Keep ratio** (§7.4), when on, holds `width/ratio` through any of these. Editing the **auto** crop
 writes offsets; editing the **drawn window** writes the window itself:
@@ -553,17 +575,19 @@ L = (left\_base − new.left)/w·100        R = (new.right  − (left\_base + W)
 T = (top\_base  − new.top )/h·100        B = (new.bottom − (top\_base  + H))/h·100
 ```
 
-### 9.4 Drawing creates a live crop window, per page — not a commit
+### 9.4 Drawing creates the live crop window — not a commit
 
-A rubber-banded rectangle becomes `drawn\[page]` — a **live, adjustable crop window** shown with
-the standard dashed frame + handles on the still-full page. It is **not** committed and the view
-is **not** magnified: the page keeps its scale until **Crop** commits (then §12.1 shows the saved
-look). A new draw **replaces** the page's window; a draw smaller than `2·MIN\_RECT` is discarded;
-`Esc` / right-click outside a drag **drops** the window. The window deliberately does **not** touch
-the global `union`/offsets, so placing a precise window on one page never resizes the live preview
-on the *others*. Auto-detect remains the shared global tool; the drawn window is the per-page
-override, and it takes precedence over the auto frame on its page — on screen, at Crop, and at
-export (§12.4).
+A rubber-banded rectangle becomes `drawn` — **the** live, adjustable crop window, the mouse-placed
+equivalent of the Auto-detect frame. It shows with the standard dashed frame + handles on **every
+uncommitted page** (clamped to each page's extent), and while it exists it takes precedence over
+the auto frame — on screen, at Crop, and at export (§12.4). Nothing is committed and the view is
+**never magnified**: every page keeps its scale until **Crop** commits the window over the Pages
+selection (then §12.1 shows the saved look). A new draw **replaces** the window; a draw smaller
+than `2·MIN\_RECT` is discarded; `Esc` / right-click outside a drag **drops** it. While Keep ratio
+is OFF, releasing a draw **updates the ratio field to the drawn box's width / height** (§7.4), so
+turning the lock on afterwards keeps exactly the window you drew. The window deliberately does
+**not** touch the global `union`/offsets — Auto-detect's cached result survives and shows again
+when the window is dropped.
 
 ### 9.5 A crop is never dropped except by Undo or a valid replacement
 
@@ -666,11 +690,12 @@ one press and re-filtering starts from the un-filtered image.
 
 A single control. It is the learned **docuwarp / ONNX mesh unwarp**, which removes page curl/fold
 and the incidental skew in one pass (there is no separate deskew step). The ONNX session is cached
-process-wide (§17). The **Dewarp-supersample** setting (§15) renders the page larger before the
-mesh remap and downsamples after, trading time for less resampling blur — the setting is **honoured
-by the pipeline** (a value of 1.0 disables it). If docuwarp is missing **or its inference fails for
-any reason**, the page falls back to plain auto-deskew with a logged warning — the batch never
-dies on a dewarp failure and never commits a half-processed selection (§14).
+process-wide (§17). The **Dewarp-supersample** setting (§15, default **1.0** = off) renders the
+page larger before the mesh remap and downsamples after, trading time for less resampling blur.
+If docuwarp is missing **or its inference fails for any reason**, the page falls back to plain
+auto-deskew — the batch never dies on a dewarp failure and never commits a half-processed
+selection (§14) — and, because a silent fallback looks like a dead button, the window **shows one
+warning dialog after the batch** naming the reason (`AppModel.take_dewarp_notice()`, §20).
 
 ### 10.2 Filter modes (each 3 strengths)
 
@@ -728,9 +753,10 @@ native crop resolution (`target = None`); `High/Medium/Low` resample the crop to
 Stores the crop box(es) per page in the `applied` map (§9.1) over the Pages selection; other pages
 are untouched. This is the persisted crop state and is covered by Undo. **Apply requires a crop
 source** (§7.7); with none it is a **no-op** — nothing is committed and no snapshot is taken.
-Per selected page the committed box is: its **drawn window** (§9.4) if it has one, else the **live
-auto crop** (§9.2) if active, else the page is **skipped** (never a silent full-page box). A
-committed drawn window is consumed (the page then shows its saved look, §12.1). After Apply the page is shown
+Per selected page the committed box is: the **drawn window** (§9.4, clamped to the page) if one
+exists, else the page's **live auto crop** (§9.2) if active, else the page is **skipped** (never a
+silent full-page box). Committing consumes the drawn window (pages then show their saved look,
+§12.1). After Apply the page is shown
 **exactly as it will be saved** — a single crop as the cropped, resized image; a 2/4 split as its N
 output pages (§12.3) — with handles hidden. It **stays cropped while you edit** (§9.3); only **Undo**
 or **Reset** returns it to the full page. A stray click never drops the crop (§9.5). Dewarp, filter and
@@ -747,7 +773,7 @@ mirrors the export exactly (what you page through is what is saved).
 
 ### 12.4 A visible crop is never dropped from the file
 
-On export each page's box is: the committed box if the page is committed, **else its drawn window
+On export each page's box is: the committed box if the page is committed, **else the drawn window
 (§9.4), else its live auto crop** when one is active (§9.1), and only the whole page when there is
 genuinely no crop. So a page that shows a crop window on screen is exported cropped **even if it
 was never Applied**. Export first commits the drawn/live crop of any uncommitted selected page
@@ -848,6 +874,9 @@ the next page's heavy work, so progress advances steadily instead of in starved 
 * **While busy, controls are disabled and further clicks are ignored** (commands are not queued — the
 simplest race-free model for a single-user desktop tool).
 * A per-page exception surfaces as an error dialog and ends the batch cleanly.
+* **After a batch that succeeded over a selection not containing the current page, the view jumps
+to the selection's first page** (detect, dewarp, filter, Crop) — the user always lands on a page
+that shows the result.
 
 \---
 
@@ -873,7 +902,7 @@ panel, aligned to the main window's top-left corner** (same alignment as Help, �
 |   Remember last folder              \[ on  ]   |
 |   Undo / redo depth   \[ 4        ]            |  bounds the history stack (default 4)
 | Scan                                          |
-|   Dewarp supersample  \[ 2.0      ]            |  quality lever for dewarp (10.1)
+|   Dewarp supersample  \[ 1.0      ]            |  quality lever for dewarp (10.1); 1.0 = off
 +-----------------------------------------------+
 ```
 
@@ -893,10 +922,14 @@ system-DPI scaling, so 100 % already renders at the system size. There is **no S
 
 ## 16\. Help
 
-A help window, opened **over the left panel — aligned to the main window's top-left corner, with
-the same height as the main window** (its width stays its own): a heading and a one-line
-description ("Crop, straighten, and clean PDFs and scans for e-readers."), then a scrollable body
-whose first item is a **Contents** card — a **single-column list of buttons**, one per section. Clicking a button scrolls the body to that section
+A help window, opened **over the left panel — aligned to the main window's top-left corner, its
+bottom edge flush with the main window's bottom** (height = the main window's interior height
+minus the title-bar offset, so it never hangs below; its width stays its own): a heading and a
+one-line description ("Crop, straighten, and clean PDFs and scans for e-readers."), then a scrollable body
+whose first item is a **Contents** card — a **single-column list of buttons**, one per section.
+The last section is **About** (app name, version, one-line purpose) — it must always be present
+(inv 36). The window's height is computed **after forcing pending layout on the main window**
+(`update_idletasks` before any `winfo_*` read), so it never uses a stale pre-layout size (inv 31). Clicking a button scrolls the body to that section
 (`yview\_moveto`) in the same window; the section blocks follow the card, in the same order. Help text
 renders one point larger than the rest of the UI.
 
@@ -983,7 +1016,7 @@ IMAGE\_LOAD\_EXT = \[".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff"]   # Load 
 THEMES         = { dark: {...}, light: {...} }
 ```
 
-The Undo/redo depth and the Dewarp-supersample factor are **runtime settings** (default 4 and 2.0),
+The Undo/redo depth and the Dewarp-supersample factor are **runtime settings** (default 4 and 1.0),
 not constants. Theme/typography maps also live here.
 
 \---
@@ -1000,8 +1033,9 @@ Cards and chrome are warm off-white / warm charcoal. **Buttons are neutral at re
 (blue `ACCENT`) only when they represent an active state — the toggles (Dewarp, B/W, Sharpen) while
 on, and **Current** while following. **Auto-detect never highlights** (it is an action, not a
 toggle). Switch-on, segmented-selected, the crop frame (`CROP\_BLUE`) and split rectangles
-(`SPLIT\_BLUE`, thick lines + large numbers) all use blue. The position text is drawn on the page image
-at top-left with a shadow for readability. The mode badge is a non-interactive marker. Disabled controls dim.
+(`SPLIT\_BLUE`, thick lines + large numbers) all use blue. Nothing is drawn over the page image;
+the pointer read-out is a white label in the shared status font at the right pane's bottom-right
+corner (§6). The mode badge is a non-interactive marker. Disabled controls dim.
 Every label stays legible in both modes. The window title shows the open file name.
 **Pictograms.** Settings, Help, Load, Save/Export, Crop, Rotate, Delete, Undo/Redo/Reset (and the
 other primary actions, §7) **lead their label with a small glyph inside the label string** —
@@ -1066,8 +1100,11 @@ the page counter shows the output total (source × N) and matches the export (§
 12. **WYSIWYG:** preview and export produce identical pixels via the one `render.output\_image`; the
 Compress DPI setting are reflected in the preview, `Original resolution`
 keeps native resolution (§12.1).
-13. **Drawing a crop is local:** the drawn window belongs to one page and leaves the global
-detection and other pages' previews unchanged; Crop commits it to that page only (§9.4).
+13. **The drawn window is the mouse twin of Auto-detect:** drawing creates one global live window
+shown on every uncommitted page; it never touches the cached detection (dropping it restores the
+auto frame); Crop commits it over the Pages selection, leaving out-of-selection pages unchanged.
+**Auto-detect symmetrically replaces a drawn window on the spot** — its result renders
+immediately, never blocked behind a manual drop (§7.4, §9.4).
 14. **The page is always inside the window:** the fitted page/crop never overflows the canvas; the
 wheel turns pages and never magnifies (§5).
 15. **A crop is never dropped except by Undo or a valid replacement** — on screen and in the file
@@ -1093,7 +1130,7 @@ page-by-page (§12.7).
 
 23\. Pictograms: every glyph-led button label **ends with the control's exact name** (tests key off the suffix, never the glyph); the split badge / dialog title / tooltip point sizes stay fixed and do not scale with the Font-size menu (§19).
 
-24\. Cancel a drag: pressing `Esc` or right-clicking during an in-progress crop/split drag discards it — nothing is committed and no history snapshot is taken — leaving the crop exactly as it was before the drag began. Outside a drag, `Esc` / right-click **drops the current page's drawn window** if it has one, and otherwise changes nothing at all (§9.3, §9.4, §9.6).
+24\. Cancel a drag: pressing `Esc` or right-clicking during an in-progress crop/split drag discards it — nothing is committed and no history snapshot is taken — leaving the crop exactly as it was before the drag began. Outside a drag, `Esc` / right-click **drops the drawn window** if one exists, **else deactivates the Auto-detect frame** (cached results kept; a re-press re-activates), and with neither changes nothing at all (§9.3, §9.4, §9.6).
 
 25\. Crop with no source is a no-op: at split = 1 with no active detection **and no drawn window on any selected page**, Apply/Crop commits nothing and takes no snapshot — full-page boxes are never committed; selected pages without any source are skipped, never full-page-committed (§7.7, §12.2).
 
@@ -1101,11 +1138,23 @@ page-by-page (§12.7).
 
 27\. Auto-detect is one undoable step: every press — including the first — pushes exactly one history snapshot, and Undo after it restores both the detection state and any crops the press refreshed (§13).
 
-28\. Drawing never magnifies: rubber-banding at split = 1 creates/replaces the page's **live drawn window** — nothing is committed, the fitted page scale is unchanged during and after the draw, and the window is shown with handles for adjustment; only Crop commits it and switches the page to its saved look (§9.4, §12.1, §12.2).
+28\. Drawing never magnifies: rubber-banding at split = 1 — on an uncommitted **or** committed page — creates/replaces the **global live drawn window**; nothing is committed, the fitted view scale is unchanged during and after the draw, the window shows with handles on every uncommitted page, and while the lock is off the ratio field follows the drawn box; only Crop commits it (over the Pages selection) and switches pages to their saved look (§9.4, §12.1, §12.2).
 
-29\. Rotate keeps the split layout valid: with split 2/4 active, rotating re-lays the N windows out on the rotated page (even grid); the drawn window and committed/detected boxes rotate with their pages (§13).
+29\. Rotate and detection commute: with split 2/4 active, rotating re-lays the N windows out on the rotated page (even grid); the drawn window and committed/detected boxes rotate with their pages; and **detection run on a rotated page returns its box in the rotated page's coordinate space** — rotate-then-detect equals detect-then-rotate (§8, §13).
 
-30\. Dewarp honours the supersample setting and degrades gracefully: a failed mesh unwarp falls back to auto-deskew with a warning — never a dead button, a crashed batch, or a partial commit (§10.1, §14).
+30\. Dewarp honours the supersample setting and degrades gracefully: a failed mesh unwarp falls back to auto-deskew — never a dead button, a crashed batch, or a partial commit — and the fallback is **surfaced as one warning dialog after the batch**, never silent (§10.1, §14, §20).
 
-31\. Windows placement: Settings and Help open aligned to the main window's top-left corner; Help matches the main window's height (§15, §16).
+31\. Windows placement: Settings and Help open aligned to the main window's top-left corner; Help's bottom edge never extends below the main window's bottom edge, and its height is computed only after pending layout is forced (`update_idletasks`) — never from a stale pre-layout size (§15, §16).
+
+32\. Cursor read-out: while the pointer is over the page, its position (percent of the page) shows in the label at the **bottom-right corner of the right pane** (white, shared status font) and empties when the pointer leaves; **no text is drawn on the page image** — the output-page position appears only in the pinned nav bar (§6, §7.8, §19).
+
+33\. Land on the result: a successful batch (detect, dewarp, filter, Crop) over a selection that does not contain the current page jumps the view to the selection's first page (§14).
+
+34\. Hover nav arrows: `◀`/`▶` appear at the canvas's left/right edge midpoints while the pointer is over the canvas, styled like the bottom nav, and turn one output page per click; they hide when the pointer leaves and disable at their end of the document like the bottom nav (§6).
+
+35\. A new box starts clean: creating a new live crop box — by Auto-detect or by drawing — drops the previously active box and resets all four offsets to 0 before the new box appears (§7.4).
+
+36\. Help always contains an About section (app name, version, purpose), reachable from the Contents card (§16).
+
+37\. Navigation disables at the bounds: Prev is disabled on the first output page, Next on the last, both on a one-page document — for the bottom nav and the hover arrows alike — and the disabled states refresh on every navigation path: buttons, arrows, wheel, keyboard, jump box (§7.8, §6).
 

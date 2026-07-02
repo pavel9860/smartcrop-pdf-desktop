@@ -19,4 +19,4 @@ class Settings:
     output_folder: str = ""                # "" → same folder as the source file
     output_postfix: str = "_cropped"       # appended before the extension (§12.5)
     undo_depth: int = 4
-    dewarp_supersample: float = 2.0
+    dewarp_supersample: float = 1.0     # 1.0 = off (§10.1); raise for less resampling blur

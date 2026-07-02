@@ -9,7 +9,7 @@ version = "0.9.1"
 description = "Crop, straighten and clean PDFs and scans for comfortable e-reader reading."
 requires-python = ">=3.12"
 dependencies = [
-    "customtkinter>=5.2",
+    "customtkinter==6.0.0",   # exact pin: geometry timing differs across 5.x/6.x
     "pymupdf>=1.24",
     "opencv-python>=4.9",
     "numpy>=1.26",

@@ -67,11 +67,11 @@ def test_construction_refreshes_nav_bar(app):
 def test_refresh_all_disables_controls_while_busy(app):
     app._current_job = object()  # any non-None sentinel marks busy
     app.refresh_all()
-    assert app.btn_prev.cget("state") == "disabled"
+    assert app.btn_next.cget("state") == "disabled"
     assert app.entry_page.cget("state") == "disabled"
     app._current_job = None
     app.refresh_all()
-    assert app.btn_prev.cget("state") == "normal"
+    assert app.btn_next.cget("state") == "normal"   # (Prev stays off: page 1 bound, inv 37)
 
 
 # ── dispatch / dispatch_job — the only two SmartCropError catch sites ────────────────────────
@@ -147,7 +147,7 @@ def test_handle_callback_error_unsticks_ui(app):
     assert app._current_job is None
     assert app.progress.frame.winfo_manager() == ""
     assert app.errors and app.errors[-1] == ("ValueError", "kaboom")
-    assert app.btn_prev.cget("state") == "normal"
+    assert app.btn_next.cget("state") == "normal"   # (Prev stays off: page 1 bound, inv 37)
 
 
 # ── auto-detect never highlighted ─────────────────────────────────────────────────────────────
@@ -333,17 +333,42 @@ def test_set_scale_clamps_to_bounds(app):
     assert app.ui_config.ui_scale == UI_SCALE_MIN
 
 
-# ── position text on the page image, bottom-left (§6, §19; bugs #7/#20) ───────────────────────
-def test_position_drawn_bottom_left_on_page_image(app):
-    snap = app.canvas_view.redraw()
+# ── no text on the page image; cursor read-out in the pane corner (§6, §19; inv 32) ───────────
+def test_nothing_drawn_over_the_page_image(app):
+    app.canvas_view.redraw()
     canvas = app.canvas_view.canvas
-    items = canvas.find_withtag("status")
-    assert items, "position text missing after redraw"
-    for item in items:
-        assert canvas.itemcget(item, "anchor") == "sw"
-    assert canvas.itemcget(items[-1], "text") == snap.status
-    assert "%" not in snap.status                # positions only — no coordinate read-out
-    assert snap.status.split(" /")[0].strip().isdigit()   # "3 / 24", no 'page' prefix
+    text_items = [i for i in canvas.find_all() if canvas.type(i) == "text"]
+    assert text_items == []                      # inv 32: the page image stays clean
+    assert app.lbl_total.cget("text").startswith("/ ")   # n/total lives in the nav bar instead
+
+
+def test_cursor_readout_label_fills_and_clears(app):
+    import types
+    view = app.canvas_view
+    snap = view.redraw()
+    assert view.coords_label.winfo_manager() == "place"  # pane corner, not the canvas
+    assert view.coords_label.place_info()["anchor"] == "se"
+    cx, cy = view._to_canvas(snap.page_w / 2, snap.page_h / 2)
+    view._motion(types.SimpleNamespace(x=cx, y=cy))
+    assert "x 50.0%" in view.coords_label.cget("text")
+    assert view.coords_label.cget("text_color") == "#FFFFFF"
+    view._pointer_left(types.SimpleNamespace(x=-1, y=-1))
+    assert view.coords_label.cget("text") == ""
+
+
+# ── hover nav arrows on the canvas edges (§6; inv 34) ─────────────────────────────────────────
+def test_nav_arrows_appear_on_hover_and_navigate(app, monkeypatch):
+    view = app.canvas_view
+    assert view.btn_arrow_prev.winfo_manager() == ""       # hidden at rest
+    view._show_arrows()
+    assert view.btn_arrow_prev.winfo_manager() == "place"
+    assert view.btn_arrow_next.winfo_manager() == "place"
+    view.btn_arrow_next.cget("command")()                  # ▶ turns one page
+    assert app.entry_page.get() == "2"
+    holder = view.canvas.master
+    monkeypatch.setattr(holder, "winfo_pointerxy", lambda: (999999, 999999))
+    view._hide_arrows()
+    assert view.btn_arrow_prev.winfo_manager() == ""
 
 
 # ── progress overlay fully painted before the first heavy step (§14; bugs #8) ─────────────────
@@ -418,13 +443,59 @@ def test_settings_window_opens_at_main_top_left(app):
     app._settings_win.destroy()
 
 
-def test_help_window_opens_at_main_top_left_full_height(app):
+def test_help_window_opens_at_main_top_left_and_never_below_bottom(app):
     app.root.update_idletasks()                  # settle root geometry before capturing it
-    expected = max(400, app.root.winfo_height())
     app._open_help()
     app._help_win.deiconify()                    # CTkToplevel defers mapping; force it so the
     app._help_win.update()                       # requested geometry is actually applied
     geo = app._help_win.geometry()
     assert geo.endswith(f"+{app.root.winfo_rootx()}+{app.root.winfo_rooty()}")
-    assert int(geo.split("x")[1].split("+")[0]) == expected
+    # inv 31: Help's outer bottom edge must not pass the main window's bottom edge. Outer top is
+    # at rooty; add its own decoration + height and compare (headless WMs may report decoration
+    # 0 — the assertion holds in both cases; the pixel truth is additionally screenshot-checked).
+    height = int(geo.split("x")[1].split("+")[0])
+    decoration = max(0, app._help_win.winfo_rooty() - app._help_win.winfo_y())
+    help_bottom = app.root.winfo_rooty() + decoration + height
+    main_bottom = app.root.winfo_rooty() + app.root.winfo_height()
+    assert help_bottom <= main_bottom
     app._help_win.destroy()
+
+
+def test_help_contains_about_with_version(app):
+    from ui.constants import APP_VERSION
+    from ui.help_content import SECTIONS
+    assert SECTIONS[-1].title == "About"         # inv 36: last section, always present
+    assert APP_VERSION in SECTIONS[-1].body
+    app._open_help()                             # and the window builds with it
+    assert app._help_win.winfo_exists()
+    app._help_win.destroy()
+
+
+# ── navigation disables at the bounds on every path (§7.8; inv 37) ────────────────────────────
+def test_nav_disabled_at_bounds_via_every_path(app):
+    assert app.panel is not None
+    assert app.btn_prev.cget("state") == "disabled"          # page 1: Prev + ◀ off
+    assert app.canvas_view.btn_arrow_prev.cget("state") == "disabled"
+    assert app.btn_next.cget("state") == "normal"
+    app.shortcut_actions["<Right>"]()                        # keyboard path refreshes states
+    assert app.btn_prev.cget("state") == "normal"
+    app.dispatch(lambda: app.model.jump_to_output_page(app.model.view_total))   # jump path
+    assert app.btn_next.cget("state") == "disabled"          # last page: Next + ▶ off
+    assert app.canvas_view.btn_arrow_next.cget("state") == "disabled"
+    assert app.btn_prev.cget("state") == "normal"
+    app.canvas_view._wheel_prev(None)                        # wheel path refreshes states
+    assert app.btn_next.cget("state") == "normal"
+
+
+def test_nav_disabled_both_ways_on_one_page_doc(app, tmp_path):
+    import fitz
+    p = tmp_path / "one.pdf"
+    d = fitz.open()
+    d.new_page(width=300, height=400)
+    d.save(str(p))
+    d.close()
+    app.dispatch(lambda: app.model.load_files([str(p)]))
+    assert app.btn_prev.cget("state") == "disabled"
+    assert app.btn_next.cget("state") == "disabled"
+    assert app.canvas_view.btn_arrow_prev.cget("state") == "disabled"
+    assert app.canvas_view.btn_arrow_next.cget("state") == "disabled"

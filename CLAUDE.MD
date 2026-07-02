@@ -72,6 +72,7 @@ set_same_size(on: bool) -> None
 
 # scan processing
 run_dewarp() -> BatchJob
+take_dewarp_notice() -> str | None    # fallback reason of the last batch, read-once
 set_filter_mode(mode: FilterMode) -> BatchJob
 set_filter_strength(n: int) -> BatchJob
 
@@ -121,6 +122,22 @@ result() -> Ok | Cancelled | Failed
 ```
 `root.after` calls `step()` once per tick. Progress bar repaints after each tick via
 `root.update_idletasks()`. Cancel before the first tick writes no file.
+
+## Standing rules (learned the hard way — check every round)
+- Version pin: run `python -c "import customtkinter; print(customtkinter.__version__)"` in the
+  env you test in BEFORE touching UI code. Pinned: customtkinter==6.0.0 (pyproject). Geometry
+  timing differs across 5.x/6.x — an unpinned mismatch is a live suspect for layout bugs.
+- [visual] items: after fixing, run the app under Xvfb, screenshot, and READ the PNG to confirm
+  pixels before closing. A passing test or code inspection alone never closes a [visual] item.
+- Blast radius: before modifying shared UI-construction code, enumerate everything else it
+  renders/constructs and confirm nothing silently disappears (the Help/status rewrites cost us
+  About and the cursor read-out once).
+- Mount bridge cache (Cowork/VM sessions): if an edited file reads back stale or tail-truncated
+  through the mount, do a rename round-trip (`mv f f.p && mv f.p f`) to unpin it, then re-verify.
+- Spec invariants are append-only and continuous (§22, currently 1–37): amend the invariant that
+  already governs a corrected behavior; add new numbers only for net-new requirements; never two
+  invariants for one concern.
+- Geometry reads (`winfo_*`) are valid only after `update_idletasks()` on the window being read.
 
 ## Process
 - Read CLAUDE.md + the ≤6 files actually needed for the task. Never load the whole

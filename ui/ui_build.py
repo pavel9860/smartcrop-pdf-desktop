@@ -377,8 +377,13 @@ def _settings_switch(parent: ctk.CTkBaseClass, label: str, on: bool, fonts: Font
 def build_help_window(parent: ctk.CTk, fonts: Fonts) -> ctk.CTkToplevel:
     win = ctk.CTkToplevel(parent)
     win.title("Help & Quick-Start")
-    # Over the left panel: main window's top-left corner, main window's height (§16, inv 31).
-    height = max(400, parent.winfo_height())
+    # Over the left panel: top-left corners aligned, bottom edge flush with the main window's —
+    # subtract the title-bar offset so the window never hangs below it (§16, inv 31). Force the
+    # main window's pending layout FIRST: winfo_* on an un-settled window returns pre-layout
+    # values (the root cause of the recurring too-tall Help).
+    parent.update_idletasks()
+    decoration = max(0, parent.winfo_rooty() - parent.winfo_y())
+    height = max(400, parent.winfo_height() - decoration)
     win.geometry(f"640x{height}+{parent.winfo_rootx()}+{parent.winfo_rooty()}")
     win.transient(parent)
     win.after(100, lambda: (win.lift(), win.focus_force()))

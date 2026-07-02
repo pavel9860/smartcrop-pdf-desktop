@@ -69,15 +69,16 @@ def test_keep_ratio_snaps_hand_drawn(model):
     assert win.width / win.height == pytest.approx(2.0, abs=0.05)
 
 
-def test_keep_ratio_snaps_crop_edit(model, run_job):
+def test_keep_ratio_snaps_draw_on_committed_page(model, run_job):
     run_job(model.detect_content())
     model.apply_crop()
     model.current_page = 0
     model.set_keep_ratio(True, 1.5)
     snap = model.view_snapshot()
-    model.begin_drag(2, 2, tol=3.0)
+    model.begin_drag(2, 2, tol=3.0)              # draw a window over the committed view (§9.3)
     model.update_drag(snap.page_w * 0.6, snap.page_h * 0.6)
     model.end_drag()
+    model.apply_crop()                           # Crop commits the ratio-snapped window
     out = model.view_snapshot()
     assert out.page_w / out.page_h == pytest.approx(1.5, abs=0.05)
 

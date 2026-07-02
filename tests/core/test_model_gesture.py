@@ -31,40 +31,68 @@ def test_draw_creates_window_without_commit_or_zoom(model):
     assert (win.x0, win.y0, win.x1, win.y1) == pytest.approx((50, 50, 250, 550))
 
 
-def test_drawn_window_is_local_to_its_page(model, run_job):
+def test_drawn_window_is_global_like_autodetect(model, run_job):
     run_job(model.detect_content())
-    before_other = _box(model, 1)
     model.current_page = 0
-    model.begin_drag(5, 5, tol=3.0)              # outside the auto frame → draw a window
+    model.begin_drag(5, 5, tol=3.0)              # outside the auto frame → draw the window
     model.update_drag(300, 500)
     model.end_drag()
-    assert _box(model, 1) == before_other        # other pages' live crop unchanged (inv 13)
-    assert not _committed(model, 0)              # still uncommitted
+    win0 = _box(model, 0)
+    assert (win0.x0, win0.y1) == pytest.approx((5, 500))
+    win1 = _box(model, 1)                        # inv 13: shown on every page, overriding auto
+    assert (win1.x0, win1.y0, win1.x1, win1.y1) == pytest.approx(
+        (win0.x0, win0.y0, win0.x1, win0.y1))
+    assert not _committed(model, 0)              # still a live window, not a commit
 
 
-def test_crop_commits_the_drawn_window(model):
+def test_crop_commits_the_drawn_window_over_selection(model, select):
     model.begin_drag(50, 50, tol=3.0)
     model.update_drag(250, 550)
     model.end_drag()
     assert model.can_apply                       # the window is a crop source (§7.7)
+    select(model, "1-2")
     model.apply_crop()
-    snap = model.view_snapshot()
-    assert snap.overlay == ()                    # committed: shown as saved, no handles (§12.1)
-    assert snap.page_w == pytest.approx(200)
-    assert model.can_undo                        # the commit is one undoable step
-    model.current_page = 1                       # sourceless page: skipped, still full (inv 25)
-    other = model.view_snapshot()
-    assert other.page_w > 500 and other.overlay == ()
+    for page in (0, 1):                          # committed on the whole selection (§12.2)
+        model.current_page, model.view_box = page, 0
+        snap = model.view_snapshot()
+        assert snap.page_w == pytest.approx(200)
+        assert snap.overlay == ()                # the window was consumed by the commit
+    model.current_page = 2                       # outside the selection: untouched (inv 25)
+    assert model.view_snapshot().page_w > 500
 
 
-def test_escape_drops_the_drawn_window(model):
-    model.begin_drag(50, 50, tol=3.0)
-    model.update_drag(250, 550)
+def test_escape_drops_window_then_deactivates_auto(model, run_job):
+    run_job(model.detect_content())
+    model.begin_drag(5, 5, tol=3.0)
+    model.update_drag(300, 500)
     model.end_drag()
-    assert model.view_snapshot().overlay         # window on screen
-    model.cancel_drag()                          # Esc / right-click, no drag → drop (§9.4)
+    model.cancel_drag()                          # 1st Esc: drop the drawn window (§9.4)
+    auto = model.view_snapshot().overlay
+    assert auto and auto[0].box.x0 != pytest.approx(5)   # the auto frame shows again
+    model.cancel_drag()                          # 2nd Esc: deactivate the auto frame (inv 24)
     assert model.view_snapshot().overlay == ()
+    assert model.auto_active is False
     assert model.can_apply is False
+
+
+def test_draw_on_committed_page_places_window_without_zoom(model):
+    model.begin_drag(50, 50, tol=3.0)
+    model.update_drag(450, 650)
+    model.end_drag()
+    model.apply_crop()                           # committed: 400×600 view
+    w0 = model.view_snapshot().page_w
+    model.begin_drag(20, 30, tol=3.0)            # draw INSIDE the committed view
+    model.update_drag(220, 330)
+    model.end_drag()
+    snap = model.view_snapshot()
+    assert snap.page_w == pytest.approx(w0)      # inv 28: no zoom until Crop
+    assert snap.overlay                          # the window is visible over the cropped view
+    win = snap.overlay[0].box                    # …in the output box's own coordinates
+    assert (win.x0, win.y0) == pytest.approx((20, 30))
+    model.apply_crop()                           # Crop re-commits through the window
+    snap2 = model.view_snapshot()
+    assert snap2.page_w == pytest.approx(200)    # 220−20 in page units
+    assert snap2.overlay == ()
 
 
 def test_drawn_window_moves_and_resizes(model):
@@ -131,19 +159,22 @@ def test_tiny_crop_edit_keeps_committed_crop(model, run_job):
     assert model.view_snapshot().page_w == pytest.approx(page_w)
 
 
-def test_crop_edit_tightens_and_is_undoable(model, run_job):
+def test_draw_then_crop_tightens_committed_page_and_is_undoable(model, run_job):
     run_job(model.detect_content())
     model.apply_crop()
     model.current_page = 0
     snap = model.view_snapshot()
     w, h = snap.page_w, snap.page_h
-    undo_before = model.can_undo
-    model.begin_drag(2, 2, tol=3.0)              # rubber-band inside the committed view
+    model.begin_drag(2, 2, tol=3.0)              # rubber-band inside the committed view (§9.3)
     model.update_drag(w * 0.5, h * 0.5)
     model.end_drag()
-    assert _committed(model, 0)                  # stays committed (§9.3 option a)
+    assert model.view_snapshot().page_w == pytest.approx(w)   # window only — no zoom (inv 28)
+    model.apply_crop()                           # Crop re-commits through the window
+    assert _committed(model, 0)
     assert model.view_snapshot().page_w < w      # tightened
-    assert model.can_undo and (undo_before or True)
+    assert model.can_undo
+    model.undo()
+    assert model.view_snapshot().page_w == pytest.approx(w)   # back to the previous commit
 
 
 # ── cancel a drag (inv 24) ──────────────────────────────────────────────────────

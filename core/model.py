@@ -107,6 +107,7 @@ class AppModel:
         self.draw_rect: Box | None = None
         self._drag_moved = False
         self._out_cache = LRUCache(CACHE_WINDOW)  # committed output images, (page, vb)-keyed (§17)
+        self._dewarp_notice: str | None = None    # one fallback reason per batch (§10.1, inv 30)
         self.doc: Any = None                      # fitz.Document | None (fitz is untyped)
         self.input_paths: list[str] = []
         self.page_sizes: list[tuple[float, float]] = []
@@ -253,14 +254,23 @@ class AppModel:
 
     def _dewarp_bgr(self, bgr: Any) -> Any:
         """Mesh unwarp at the supersample setting (§10.1); ANY inference failure — missing dep,
-        ONNX runtime error, bad model — degrades to plain auto-deskew with a warning, so the
-        batch never dies on a dewarp failure (inv 30)."""
-        if core.imaging.unwarp_available():
+        ONNX runtime error, bad model — degrades to plain auto-deskew, records the reason for the
+        window to surface (`take_dewarp_notice`), and never kills the batch (inv 30)."""
+        if not core.imaging.unwarp_available():
+            self._dewarp_notice = ("docuwarp/onnxruntime is not installed — used plain deskew "
+                                   "only. Install them to enable mesh dewarp.")
+        else:
             try:
                 return core.imaging.unwarp_supersampled(bgr, self.settings.dewarp_supersample)
             except Exception as exc:
                 warnings.warn(f"dewarp failed, falling back to deskew: {exc}", stacklevel=2)
+                self._dewarp_notice = f"Mesh dewarp failed ({exc}) — used plain deskew only."
         return core.imaging.deskew_auto(bgr)[0]
+
+    def take_dewarp_notice(self) -> str | None:
+        """The last batch's dewarp-fallback reason, if any — read once, then cleared (§10.1)."""
+        notice, self._dewarp_notice = self._dewarp_notice, None
+        return notice
 
     # ── pages selection ──────────────────────────────────────────────────────
     def resolve_pages(self) -> list[int]:
@@ -304,17 +314,26 @@ class AppModel:
             raise ImagingError(f"Page {i + 1}: detection failed ({exc}).") from exc
 
     def _content_box_page(self, idx: int) -> Box:
-        w, h = self._page_dims(idx)
-        if self.mode == Mode.NORMAL:
-            if self.doc is not None:
-                return detect.normal_page_box(self.doc, idx, w, h)
-            return synthetic.text_box(idx, w, h)
-        return detect.scanned_page_box(self._work_image(idx), w, h)
+        if self.mode != Mode.NORMAL:
+            w, h = self._page_dims(idx)          # scanned path reads the already-rotated raster
+            return detect.scanned_page_box(self._work_image(idx), w, h)
+        # Native path: text blocks are in UNROTATED page coordinates — rotate the box into the
+        # page's current orientation so detect-after-rotate equals rotate-after-detect (inv 29).
+        uw, uh = self.page_sizes[idx]
+        box = (detect.normal_page_box(self.doc, idx, uw, uh) if self.doc is not None
+               else synthetic.text_box(idx, uw, uh))
+        for _ in range((self.document.rotation.get(idx, 0) // 90) % 4):
+            box = rotate_box_cw(box, uw, uh)
+            uw, uh = uh, uw
+        return box
 
     def _finish_detect(self, results: dict[int, Box]) -> None:
         d = self.document
         recommit = [i for i in results if i in d.applied]
         self.history.push(d)                # every detect press is one undoable step (§13, inv 27)
+        d.drawn = None                      # a new box replaces the drawn window on the spot …
+        d.offsets = Offsets()               # … and starts clean (§7.4, inv 13/35)
+        self._land_on(sorted(results))      # show the result (§14, inv 33)
         d.detect_cache.update(results)
         good = [b for i, b in results.items()
                 if b.width < FULL_PAGE_FRAC * self._page_dims(i)[0]
@@ -423,6 +442,7 @@ class AppModel:
         indices = self.resolve_pages()
         if not indices:
             raise EmptySelectionError("Empty Pages selection.")
+        self._dewarp_notice = None               # fresh batch → fresh fallback report (§10.1)
         new_on = not self.document.dewarp_on
         intents = {i: replace(self.document.processed.get(i, PageProcessIntent()), dewarp=new_on)
                    for i in indices}
@@ -463,6 +483,7 @@ class AppModel:
             d = self.document
             self.history.push(d)
             self._out_cache.clear()               # work rasters change under unchanged boxes
+            self._land_on(indices)                # show the result (§14, inv 33)
             for i, intent in intents.items():
                 d.processed[i] = intent
                 self.work_cache[i] = computed[i]
@@ -483,15 +504,23 @@ class AppModel:
 
     # ── apply / rotate / delete (§12.2, §13) ─────────────────────────────────
     def _page_crop_boxes(self, i: int) -> list[Box] | None:
-        """Page i's crop source: split rectangles, else its drawn window, else the live auto
-        crop — None when the page has no source at all (§12.2: skipped, never full-page)."""
+        """Page i's crop source: split rectangles, else the drawn window (clamped to the page),
+        else its live auto crop — None when there is no source (§12.2: skipped, never full-page)."""
         if self.split_count > 1:
             return list(self.document.crop_rects)
-        drawn = self.document.drawn.get(i)
+        drawn = self._drawn_on_page(i)
         if drawn is not None:
             return [drawn]
         rect = self._crop_rect(i)
         return [rect] if rect is not None else None
+
+    def _drawn_on_page(self, i: int) -> Box | None:
+        """The global drawn window as it lands on page i — clamped to that page's extent (§9.4)."""
+        drawn = self.document.drawn
+        if drawn is None:
+            return None
+        w, h = self._page_dims(i)
+        return clamp_box(drawn, w, h)
 
     def apply_crop(self) -> None:
         if self.page_count() == 0:
@@ -507,8 +536,9 @@ class AppModel:
         self.history.push(self.document)
         for i, boxes in commits.items():
             self.document.applied[i] = boxes
-            self.document.drawn.pop(i, None)     # the window became the crop (§12.2)
+        self.document.drawn = None          # the window became the crop (§12.2)
         self._clamp_view_box()
+        self._land_on(sorted(commits))
 
     def _has_crop_source(self) -> bool:
         """A live auto crop exists: detection ran and ≥ 1 anchor is ON (§7.7, §12.2)."""
@@ -530,10 +560,11 @@ class AppModel:
             self.work_cache.pop(i, None)
             if i in d.applied:                   # carry the committed crop through the turn
                 d.applied[i] = [rotate_box_cw(b, w, h) for b in d.applied[i]]
-            if i in d.drawn:                     # the drawn window turns with its page (§13)
-                d.drawn[i] = rotate_box_cw(d.drawn[i], w, h)
             if i in d.detect_cache:
                 d.detect_cache[i] = rotate_box_cw(d.detect_cache[i], w, h)
+        if d.drawn is not None:                  # the drawn window turns with the pages (§13)
+            cw_, ch_ = self._page_dims(self.current_page)
+            d.drawn = rotate_box_cw(d.drawn, ch_, cw_)   # pre-turn dims of the current page
         if d.auto_active and d.detect_cache:
             d.union = union_box(list(d.detect_cache.values()))
             d.offsets = Offsets()                # L/T/R/B map to rotated edges → reset to 0
@@ -561,7 +592,6 @@ class AppModel:
         d.detect_cache = _reindex(d.detect_cache, deleted)
         d.processed = _reindex(d.processed, deleted)
         d.applied = _reindex(d.applied, deleted)
-        d.drawn = _reindex(d.drawn, deleted)
         d.rotation = _reindex(d.rotation, deleted)
         if d.auto_active and d.detect_cache:
             d.union = union_box(list(d.detect_cache.values()))
@@ -622,7 +652,7 @@ class AppModel:
         if i in self.document.applied:
             boxes = self.document.applied[i]
         else:                                    # §12.4: drawn window, else live auto, else whole
-            cb = (self.document.drawn.get(i) or self._crop_rect(i)
+            cb = (self._drawn_on_page(i) or self._crop_rect(i)
                   if self.split_count == 1 else None)
             boxes = [cb] if cb is not None else [Box(0, 0, w, h)]
         rc = self._remove_colours()
@@ -648,7 +678,6 @@ class AppModel:
                 boxes = self._page_crop_boxes(i)
                 if boxes is not None:            # sourceless pages stay whole, never full-boxed
                     self.document.applied[i] = boxes
-                    self.document.drawn.pop(i, None)
         pages = list(range(self.page_count()))
         if self.settings.export_format == "PDF":
             return export.pdf_job(path, pages, self._render_page_outputs, self._page_is_bilevel)
@@ -673,10 +702,10 @@ class AppModel:
         self._drag_moved = False
         self.draw_rect = None
         if self.document.applied.get(self.current_page):
-            # Any committed page — single or split — stays shown cropped; the only gesture is
-            # drawing a new rectangle inside the shown output page (§9.3, §9.6, inv 26). The
-            # coordinates stay in the output box's own units; windows are never re-exposed.
-            self.drag = CropEditDrag((px, py))
+            # A committed page stays shown cropped; the only gesture is drawing. At split = 1 the
+            # band becomes the global drawn window (mapped to page coords on release, §9.3/§9.4);
+            # on a committed split page it tightens the shown output window (§9.6, inv 26).
+            self.drag = DrawDrag((px, py)) if self.split_count == 1 else CropEditDrag((px, py))
             return
         if self.split_count > 1:
             self._begin_split(px, py, tol)
@@ -684,7 +713,7 @@ class AppModel:
             self._begin_auto(px, py, tol)
 
     def _begin_auto(self, px: float, py: float, tol: float) -> None:
-        drawn = self.document.drawn.get(self.current_page)
+        drawn = self._drawn_on_page(self.current_page)
         if drawn is not None:                    # the drawn window overrides the auto frame (§9.4)
             handle = hit_handle(drawn, px, py, tol)
             if handle is not None or point_in_box(drawn, px, py):
@@ -739,11 +768,11 @@ class AppModel:
                     d.rect0, px - d.start[0], py - d.start[1], w, h)
             case WindowDrag(handle=str() as handle):
                 w, h = self._page_dims(self.current_page)
-                self.document.drawn[self.current_page] = resize_by_handle(
+                self.document.drawn = resize_by_handle(
                     d.rect0, handle, px - d.start[0], py - d.start[1], w, h)
             case WindowDrag():
                 w, h = self._page_dims(self.current_page)
-                self.document.drawn[self.current_page] = move_box(
+                self.document.drawn = move_box(
                     d.rect0, px - d.start[0], py - d.start[1], w, h)
             case DrawDrag() | CropEditDrag():
                 bw, bh = self._drag_view_dims()
@@ -807,20 +836,30 @@ class AppModel:
             rects[j] = Box(x0, y0, min(w, x0 + tw), min(h, y0 + th))
 
     def _finish_draw(self) -> None:
-        """A released rubber-band becomes the page's live drawn window — never a commit (§9.4).
-        No history snapshot: like a split-rectangle drag, this is crop *setup*; Crop commits."""
+        """A released rubber-band becomes THE live drawn window — the mouse twin of the
+        Auto-detect frame, global over the selection, never a commit (§9.4). On a committed page
+        the band arrives in output-box coordinates and is mapped back to page coordinates. No
+        history snapshot: like a split-rectangle drag, this is crop *setup*; Crop commits."""
         r = self.draw_rect
         self.draw_rect = None
         if r is None or r.width < 2 * MIN_RECT or r.height < 2 * MIN_RECT:
             return                               # aborted draw → nothing placed (§9.5)
-        self.document.drawn[self.current_page] = self._snap_ratio(r)
+        applied = self.document.applied.get(self.current_page)
+        if applied:                              # committed view → translate into page coords
+            box = applied[max(0, min(self.view_box, len(applied) - 1))]
+            r = Box(box.x0 + r.x0, box.y0 + r.y0, box.x0 + r.x1, box.y0 + r.y1)
+        r = self._snap_ratio(r)
+        self.document.drawn = r
+        self.document.offsets = Offsets()        # a new box starts clean (§7.4, inv 35)
+        if not self.keep_ratio and r.height:     # the ratio field follows the drawn box (§7.4)
+            self.ratio = r.width / r.height
 
     def _finish_window_drag(self) -> None:
         """Snap the adjusted drawn window to the Keep-ratio lock on release (§9.7)."""
-        page = self.current_page
-        drawn = self.document.drawn.get(page)
-        if drawn is not None:
-            self.document.drawn[page] = self._snap_ratio(drawn)
+        if self.document.drawn is not None:
+            self.document.drawn = self._snap_ratio(self.document.drawn)
+            if not self.keep_ratio and self.document.drawn.height:
+                self.ratio = self.document.drawn.width / self.document.drawn.height
 
     def _snap_ratio(self, r: Box) -> Box:
         if not self.keep_ratio:
@@ -858,7 +897,10 @@ class AppModel:
         current page's drawn window if it has one; otherwise change nothing (§9.4, inv 24)."""
         d = self.drag
         if d is None and self.draw_rect is None:
-            self.document.drawn.pop(self.current_page, None)
+            if self.document.drawn is not None:      # drop the drawn window first (§9.4)
+                self.document.drawn = None
+            elif self.document.auto_active:          # …then deactivate the auto frame (inv 24)
+                self.document.auto_active = False
             return
         self.draw_rect = None
         self.drag = None
@@ -866,7 +908,7 @@ class AppModel:
             case SplitDrag():
                 self.document.crop_rects[d.idx] = d.rect0
             case WindowDrag():
-                self.document.drawn[self.current_page] = d.rect0
+                self.document.drawn = d.rect0
             case AutoDrag():
                 self.document.offsets = d.offsets0
             case _:
@@ -925,8 +967,9 @@ class AppModel:
             vb = max(0, min(self.view_box, len(applied) - 1))   # local clamp — query is pure
             box = applied[vb]
             image = self._cached_output(idx, vb, work, box, w, h)
-            return ViewSnapshot(image, box.width, box.height, (), self.draw_rect,
-                                self._view_position() + 1, self._view_total(), self._status_text())
+            return ViewSnapshot(image, box.width, box.height, self._drawn_in_box(box),
+                                self.draw_rect, self._view_position() + 1, self._view_total(),
+                                self._status_text())
         return ViewSnapshot(work, w, h, self._overlay_boxes(), self.draw_rect,
                             self._view_position() + 1, self._view_total(), self._status_text())
 
@@ -946,6 +989,26 @@ class AppModel:
         self._out_cache[(idx, vb)] = (box, target, rc, image)
         return image
 
+    def _drawn_in_box(self, box: Box) -> tuple[OverlayBox, ...]:
+        """The global drawn window as seen through a committed page's output box — translated to
+        the box's own coordinates and clipped, so it stays visible/adjustable there (§9.3)."""
+        drawn = self.document.drawn
+        if self.split_count > 1 or drawn is None:
+            return ()
+        x0, y0 = max(drawn.x0, box.x0) - box.x0, max(drawn.y0, box.y0) - box.y0
+        x1, y1 = min(drawn.x1, box.x1) - box.x0, min(drawn.y1, box.y1) - box.y0
+        if x1 - x0 < MIN_RECT or y1 - y0 < MIN_RECT:
+            return ()
+        return (OverlayBox(Box(x0, y0, x1, y1), "auto", -1),)
+
+    def _land_on(self, indices: list[int]) -> None:
+        """After a batch over a selection that misses the current page, jump to the selection's
+        first page so the result is on screen (§14, inv 33)."""
+        if indices and self.current_page not in indices:
+            self.current_page = indices[0]
+            self.view_box = 0
+            self._sync_follow()
+
     def _clamp_view_box(self) -> None:
         self.view_box = max(0, min(self.view_box, self._page_box_count(self.current_page) - 1))
 
@@ -953,7 +1016,7 @@ class AppModel:
         if self.split_count > 1:
             return tuple(OverlayBox(b, "split", i)
                          for i, b in enumerate(self.document.crop_rects))
-        rect = self.document.drawn.get(self.current_page) or self._crop_rect(self.current_page)
+        rect = self._drawn_on_page(self.current_page) or self._crop_rect(self.current_page)
         return (OverlayBox(rect, "auto", -1),) if rect is not None else ()
 
     def _status_text(self) -> str:
@@ -982,9 +1045,7 @@ class AppModel:
             return False
         if self.split_count > 1:
             return len(self.document.crop_rects) == self.split_count
-        if self._has_crop_source():         # detect or draw first — the prerequisite for Crop
-            return True
-        return any(i in self.document.drawn for i in self.resolve_pages())
+        return self._has_crop_source() or self.document.drawn is not None
 
     @property
     def auto_active(self) -> bool:
