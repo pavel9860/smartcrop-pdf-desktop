@@ -78,7 +78,8 @@ def test_apply_with_wrong_rect_count_raises(model):
         model.apply_crop()
 
 
-def test_apply_empty_selection_raises(model, select):
+def test_apply_empty_selection_raises(model, select, run_job):
+    run_job(model.detect_content())              # a crop source exists (inv 25 no-op not in play)
     select(model, "999")                         # out of range → empty
     with pytest.raises(EmptySelectionError):
         model.apply_crop()

@@ -159,11 +159,19 @@ def test_auto_detect_button_never_highlighted(app):
     assert before == after
 
 
-# ── Redo label stays pure text (§19) ──────────────────────────────────────────────────────────
-def test_redo_undo_reset_labels_have_no_glyph(app):
-    assert app.btn_undo.cget("text") == "Undo"
-    assert app.btn_redo.cget("text") == "Redo"
-    assert app.btn_reset.cget("text") == "Reset"
+# ── glyph-led labels end with the control's exact name (§19, inv 23) ─────────────────────────
+def test_history_labels_glyph_led_and_end_with_name(app):
+    for btn, name in ((app.btn_undo, "Undo"), (app.btn_redo, "Redo"), (app.btn_reset, "Reset")):
+        text = btn.cget("text")
+        assert text.endswith(name)           # tests key off the suffix, never the glyph
+        assert text != name                  # glyph-led: something precedes the name
+
+
+def test_action_labels_end_with_name(app):
+    assert app.panel.btn_crop.cget("text").endswith("Crop")
+    assert app.panel.btn_rotate.cget("text").endswith("Rotate")
+    assert app.panel.btn_delete.cget("text").endswith("Delete")
+    assert app.panel.btn_detect.cget("text").endswith("Auto-detect")
 
 
 # ── layout: nav bar / history buttons pinned (§7.8, #4) ───────────────────────────────────────
@@ -196,11 +204,19 @@ def test_advanced_toggle_reveals_offset_steppers(app):
         assert ancestor is app.panel.advanced_body
 
 
+def _card_of(widget, siblings):
+    """Climb to the ancestor that is one of the scroll frame's packed cards."""
+    w = widget
+    while w is not None and w not in siblings:
+        w = w.master
+    assert w is not None, "widget is not inside any packed card"
+    return w
+
+
 def test_actions_card_before_compress_card(app):
-    actions_outer = app.panel.btn_crop.master.master
-    compress_outer = app.panel.menu_compress.master.master
     siblings = app.panel.scroll.pack_slaves()
-    assert siblings.index(actions_outer) < siblings.index(compress_outer)
+    assert siblings.index(_card_of(app.panel.btn_crop, siblings)) < siblings.index(
+        _card_of(app.panel.menu_compress, siblings))
 
 
 # ── Settings at max font (#8) ─────────────────────────────────────────────────────────────────
@@ -235,12 +251,27 @@ def test_load_files_no_selection_is_a_no_op(app, monkeypatch):
 
 
 # ── shortcuts (§21) ────────────────────────────────────────────────────────────────────────────
+# `event_generate` for key events needs a mapped, focused window, which a withdrawn root does not
+# reliably provide on every platform (fails under X11/xvfb). The bindings therefore route through
+# `app.shortcut_actions` — tests assert the Tk binding exists, then invoke the action directly.
+
+_SPEC21_SEQUENCES = ("<Control-o>", "<Control-Return>", "<Control-s>", "<Control-z>",
+                     "<Control-y>", "<Left>", "<Right>", "<Prior>", "<Next>",
+                     "<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-0>",
+                     "<Escape>")
+
+
+def test_all_spec21_shortcuts_are_bound(app):
+    for seq in _SPEC21_SEQUENCES:
+        assert seq in app.shortcut_actions, f"{seq} missing from shortcut map"
+        assert app.root.bind_all(seq), f"{seq} has no Tk binding"
+
+
 def test_ctrl_o_triggers_load_dialog(app, monkeypatch):
     called = []
     monkeypatch.setattr("ui.app_window.filedialog.askopenfilenames",
                          lambda **k: called.append(True) or ())
-    app.root.event_generate("<Control-o>")
-    app.root.update()
+    app.shortcut_actions["<Control-o>"]()
     assert called == [True]
 
 
@@ -248,36 +279,31 @@ def test_ctrl_s_triggers_export_dialog(app, monkeypatch):
     called = []
     monkeypatch.setattr("ui.app_window.filedialog.asksaveasfilename",
                          lambda **k: called.append(True) or "")
-    app.root.event_generate("<Control-s>")
-    app.root.update()
+    app.shortcut_actions["<Control-s>"]()
     assert called == [True]
 
 
 def test_ctrl_enter_dispatches_apply_crop(app):
-    app.root.event_generate("<Control-Return>")
-    app.root.update()
-    assert app.errors == []  # ran without raising; nothing to assert on the synthetic doc
+    app.shortcut_actions["<Control-Return>"]()
+    assert app.errors == []  # no-source apply is a silent no-op (inv 25), never an error
 
 
 def test_arrow_keys_navigate_when_not_typing(app, monkeypatch):
     monkeypatch.setattr(app.root, "focus_get", lambda: None)
-    app.root.event_generate("<Right>")
-    app.root.update()
+    app.shortcut_actions["<Right>"]()
     assert app.entry_page.get() == "2"
 
 
 def test_arrow_keys_noop_while_typing_target_focused(app, monkeypatch):
     monkeypatch.setattr(app.root, "focus_get", lambda: app.entry_page._entry)
-    app.root.event_generate("<Right>")
-    app.root.update()
+    app.shortcut_actions["<Right>"]()
     assert app.entry_page.get() == "1"
 
 
 def test_escape_cancels_drag(app, monkeypatch):
     called = []
     monkeypatch.setattr(app.canvas_view, "cancel_drag", lambda: called.append(True))
-    app.root.event_generate("<Escape>")
-    app.root.update()
+    app.shortcut_actions["<Escape>"]()
     assert called == [True]
 
 
@@ -305,3 +331,100 @@ def test_set_scale_clamps_to_bounds(app):
     assert app.ui_config.ui_scale == UI_SCALE_MAX
     app._set_scale(-5.0)
     assert app.ui_config.ui_scale == UI_SCALE_MIN
+
+
+# ── position text on the page image, bottom-left (§6, §19; bugs #7/#20) ───────────────────────
+def test_position_drawn_bottom_left_on_page_image(app):
+    snap = app.canvas_view.redraw()
+    canvas = app.canvas_view.canvas
+    items = canvas.find_withtag("status")
+    assert items, "position text missing after redraw"
+    for item in items:
+        assert canvas.itemcget(item, "anchor") == "sw"
+    assert canvas.itemcget(items[-1], "text") == snap.status
+    assert "%" not in snap.status                # positions only — no coordinate read-out
+    assert snap.status.split(" /")[0].strip().isdigit()   # "3 / 24", no 'page' prefix
+
+
+# ── progress overlay fully painted before the first heavy step (§14; bugs #8) ─────────────────
+def test_overlay_painted_before_first_step(app):
+    from core.batch import PageJob
+    seen = []
+
+    def step(_i):
+        seen.append((app.progress.counter.cget("text"), app.progress.frame.winfo_manager()))
+
+    job = PageJob("Slow work", [0, 1], step)
+    app._start_job(job)
+    _pump(app)
+    assert seen[0] == ("0 / 2", "place")         # counter/bar painted and placed pre-step
+
+
+# ── Advanced offsets: one line, all four visible (§7.4a; bugs #1) ─────────────────────────────
+def test_offsets_on_one_line_and_compact(app):
+    from ui.constants import OFFSET_FIELD_W, PANEL_WIDTH
+    app.panel._toggle_advanced()
+    rows = {e.master.master for e in app.panel.offset_entries.values()}
+    assert len(rows) == 1                            # all four share one row container
+    for e in app.panel.offset_entries.values():
+        assert e.master.winfo_manager() == "pack"    # packed side by side, not gridded
+        assert e.cget("width") == OFFSET_FIELD_W
+    # 4 × (label 16 + gap 2 + entry) + 3 × 3 padding must fit the panel minus card chrome
+    assert 4 * (16 + 2 + OFFSET_FIELD_W) + 9 <= PANEL_WIDTH - 44
+
+
+def test_ratio_row_is_compact_and_field_wide(app):
+    from ui.constants import PANEL_WIDTH, RATIO_FIELD_W, ROW_LABEL_W, SWITCH_W
+    assert app.panel.entry_ratio.cget("width") >= RATIO_FIELD_W
+    assert app.panel.switch_keep_ratio.cget("width") == SWITCH_W
+    # label + switch + field + paddings fit the panel, so the field is never starved (#2)
+    assert ROW_LABEL_W + SWITCH_W + RATIO_FIELD_W + 20 <= PANEL_WIDTH - 44
+
+
+# ── navigation repaint uses the photo cache (§17; bugs #10) ───────────────────────────────────
+def test_redraw_reuses_photo_for_same_page(app):
+    app.canvas_view.redraw()
+    first = app.canvas_view._photo
+    app.canvas_view.redraw()                     # same page, same size → cache hit
+    assert app.canvas_view._photo is first
+    app.model.next_page()
+    app.canvas_view.redraw()
+    assert app.canvas_view._photo is not first   # different page → different bitmap
+
+
+# ── Crop gating in the panel (§7.7; inv 25) ────────────────────────────────────────────────────
+def test_crop_button_disabled_until_detect(app):
+    assert app.panel.btn_crop.cget("state") == "disabled"
+    app.dispatch_job(app.model.detect_content)
+    _pump(app)
+    assert app.panel.btn_crop.cget("state") == "normal"
+
+
+def test_crop_button_enabled_by_drawn_window(app):
+    assert app.panel.btn_crop.cget("state") == "disabled"
+    app.model.begin_drag(50, 50, 3.0)            # draw a window (§9.4) — a crop source
+    app.model.update_drag(250, 550)
+    app.model.end_drag()
+    app.refresh_all()
+    assert app.panel.btn_crop.cget("state") == "normal"
+
+
+# ── Settings / Help placement (§15, §16; inv 31) ───────────────────────────────────────────────
+def test_settings_window_opens_at_main_top_left(app):
+    app._open_settings()
+    app._settings_win.update_idletasks()
+    geo = app._settings_win.geometry()
+    assert geo.endswith(f"+{app.root.winfo_rootx()}+{app.root.winfo_rooty()}")
+    app._settings_win.destroy()
+
+
+def test_help_window_opens_at_main_top_left_full_height(app):
+    app.root.update_idletasks()                  # settle root geometry before capturing it
+    expected = max(400, app.root.winfo_height())
+    app._open_help()
+    app._help_win.deiconify()                    # CTkToplevel defers mapping; force it so the
+    app._help_win.update()                       # requested geometry is actually applied
+    geo = app._help_win.geometry()
+    assert geo.endswith(f"+{app.root.winfo_rootx()}+{app.root.winfo_rooty()}")
+    assert int(geo.split("x")[1].split("+")[0]) == expected
+    app._help_win.destroy()

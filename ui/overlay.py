@@ -1,6 +1,7 @@
 """Crop-rect + handle drawing onto the page canvas (spec §9). Pure drawing: given boxes already
 mapped to canvas pixels (via the caller's `to_canvas`), draws the dashed auto-crop frame or the
-numbered split rectangles, their 8 handles, move-sign and numbered badge. No model access, no event handling
+numbered split rectangles, their 8 handles, move-sign and numbered badge. No model access, no
+event handling
 — canvas_view.py owns the coordinate mapping and gesture wiring.
 """
 from __future__ import annotations
@@ -49,17 +50,6 @@ def _draw_handles(canvas: tk.Canvas, canvas_box: Box, colour: str) -> None:
     for _name, (hx, hy) in handle_positions(canvas_box).items():
         canvas.create_rectangle(hx - HANDLE_R, hy - HANDLE_R, hx + HANDLE_R, hy + HANDLE_R,
                                  fill=colour, outline="", tags="overlay")
-
-
-def _draw_move_sign(canvas: tk.Canvas, x1: float, y0: float, colour: str) -> None:
-    """Cosmetic affordance at the top-right corner of the (non-split) crop rectangle (§9.1); the
-    model treats any non-handle point inside the box as a move, so this glyph marks intent rather
-    than gating a separate hit-zone. Split windows have no move-sign — their top-right corner is
-    free, and they're moved the same interior-click way (§9.6); the top-left corner instead carries
-    the numbered badge."""
-    r = 6.0
-    canvas.create_oval(x1 - 2.4 * r, y0 - 0.4 * r, x1 + 0.4 * r, y0 + 2.4 * r,
-                        outline=colour, width=2, tags="overlay")
 
 
 def _draw_split_badge(canvas: tk.Canvas, x0: float, y0: float, colour: str, index: int) -> None:

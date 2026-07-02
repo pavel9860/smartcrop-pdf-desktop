@@ -35,6 +35,9 @@ core/                     Tk-free domain layer. A tkinter/customtkinter/ui impor
   batch.py         NEW    BatchJob protocol + BatchResult (Ok/Cancelled/Failed) + PageJob (the one
                            concrete job, parameterised by per-command closures) (§5.5)
   model.py         NEW    AppModel — the single facade: owns state, commands, queries (§5)
+  detect.py        NEW    per-page content-box detection helpers (§8) — pure, stateless
+  export.py        NEW    export job builders + per-page embed encoders (§12.5–§12.7)
+  synthetic.py     NEW    the placeholder demo document (§1) — sizes, text boxes, rasters
 ui/                NEW. May import core.*; core/ never imports ui/.
   app_window.py            AppWindow: root window, owns one AppModel, dispatch() (§6), drives
                            BatchJobs via root.after, report_callback_exception recovery, main()
@@ -204,10 +207,10 @@ command clears history. So no surviving snapshot can ever observe a `doc` mutate
 
 **`detect_cache`/`union` are intentionally undoable.** They are part of the crop *setup*, so
 undoing back past the Auto-detect that produced them correctly reverts the live auto-crop frame
-(consistent with the crop state of that moment). The cost is the documented corollary: detect does
-not itself take a snapshot, so undoing an action whose snapshot predates a later detect can drop
-that detect result. This is the intended trade (matches today's `_capture`); a one-line note is
-added to spec §13 (§11).
+(consistent with the crop state of that moment). **Auto-detect pushes exactly one snapshot per
+press** (spec §13), so every detect — including the first — is a clean single Undo/Redo step that
+restores both the detection state and any committed crops the press refreshed. The button stays a
+stateless action (§7.4); only its result is undoable state.
 
 ### 5.2 `Settings` (core/settings.py) and `UIConfig` (ui/config.py)
 

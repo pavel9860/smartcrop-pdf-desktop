@@ -164,10 +164,12 @@ class SmartCropApp:
 
     def _start_job(self, job: BatchJob) -> None:
         self._current_job = job
+        self.refresh_all()
         if job.total > 1:
             self.progress.place()
-        self.refresh_all()
-        self.root.after(1, self._drive)
+            self.progress.paint(job)
+            self.root.update()      # force-paint the whole overlay BEFORE heavy work (§14):
+        self.root.after(1, self._drive)     # never shown partially drawn
 
     def _drive(self) -> None:
         job = self._current_job
@@ -313,34 +315,40 @@ class SmartCropApp:
     def _is_typing_target(self) -> bool:
         return isinstance(self.root.focus_get(), tk.Entry)
 
-    def _guarded_nav(self, command: Callable[[], None]) -> Callable[[tk.Event[tk.Misc]], None]:
-        def _handler(_event: tk.Event[tk.Misc]) -> None:
+    def _guarded_nav(self, command: Callable[[], None]) -> Callable[[], None]:
+        def _action() -> None:
             if not self._is_typing_target():
                 self._nav(command)
-        return _handler
+        return _action
 
-    def _guarded(self, command: Callable[[], None]) -> Callable[[tk.Event[tk.Misc]], None]:
-        def _handler(_event: tk.Event[tk.Misc]) -> None:
+    def _guarded(self, command: Callable[[], None]) -> Callable[[], None]:
+        def _action() -> None:
             if not self._is_typing_target():
                 self.dispatch(command)
-        return _handler
+        return _action
 
     def _bind_shortcuts(self) -> None:
-        r = self.root
-        r.bind_all("<Escape>", lambda _e: self.canvas_view.handle_escape())
-        r.bind_all("<Control-Return>", lambda _e: self.dispatch(self.model.apply_crop))
-        r.bind_all("<Control-s>", lambda _e: self._export())
-        r.bind_all("<Control-z>", self._guarded(self.model.undo))
-        r.bind_all("<Control-y>", self._guarded(self.model.redo))
-        r.bind_all("<Left>", self._guarded_nav(self.model.prev_page))
-        r.bind_all("<Right>", self._guarded_nav(self.model.next_page))
-        r.bind_all("<Prior>", self._guarded_nav(self.model.prev_page))
-        r.bind_all("<Next>", self._guarded_nav(self.model.next_page))
-        r.bind_all("<Control-plus>", lambda _e: self._scale_step(1))
-        r.bind_all("<Control-equal>", lambda _e: self._scale_step(1))
-        r.bind_all("<Control-minus>", lambda _e: self._scale_step(-1))
-        r.bind_all("<Control-0>", lambda _e: self._set_scale(1.0))
-        r.bind_all("<Escape>", lambda _e: self.canvas_view.cancel_drag())
+        """One zero-arg action per §21 sequence, kept in `shortcut_actions` so tests can assert
+        the binding exists and invoke the action headless (key `event_generate` needs a mapped,
+        focused window, which a withdrawn test root doesn't reliably provide)."""
+        self.shortcut_actions: dict[str, Callable[[], None]] = {
+            "<Control-o>": self._load_files,
+            "<Control-Return>": lambda: self.dispatch(self.model.apply_crop),
+            "<Control-s>": self._export,
+            "<Control-z>": self._guarded(self.model.undo),
+            "<Control-y>": self._guarded(self.model.redo),
+            "<Left>": self._guarded_nav(self.model.prev_page),
+            "<Right>": self._guarded_nav(self.model.next_page),
+            "<Prior>": self._guarded_nav(self.model.prev_page),
+            "<Next>": self._guarded_nav(self.model.next_page),
+            "<Control-plus>": lambda: self._scale_step(1),
+            "<Control-equal>": lambda: self._scale_step(1),
+            "<Control-minus>": lambda: self._scale_step(-1),
+            "<Control-0>": lambda: self._set_scale(1.0),
+            "<Escape>": lambda: self.canvas_view.cancel_drag(),
+        }
+        for seq, action in self.shortcut_actions.items():
+            self.root.bind_all(seq, lambda _e, a=action: a())
 
     # ── unexpected-exception recovery (spec §20; ARCHITECTURE §6) ─────────────
     def _handle_callback_error(self, exc: type[BaseException], val: BaseException,

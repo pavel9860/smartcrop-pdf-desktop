@@ -16,7 +16,7 @@ from core.batch import BatchJob
 from core.constants import COLOUR_MODES, DPI_PRESETS
 from core.enums import FilterMode, Mode, PagesMode
 from core.model import AppModel
-from ui.constants import THEMES
+from ui.constants import RATIO_FIELD_W, ROW_LABEL_W, SWITCH_W, THEMES
 from ui.ui_build import (
     Fonts,
     _seg_kwargs,
@@ -28,6 +28,8 @@ from ui.ui_build import (
     option_menu,
     set_active,
     set_entry_text,
+    set_menu,
+    set_text,
     tooltip,
 )
 
@@ -112,9 +114,11 @@ class LeftPanel:
 
     def _refresh_document(self, busy: bool) -> None:
         scan = self.model.mode.value == "scanned"
-        self.mode_badge.configure(
-            text=self.model.mode.value.upper(), padx=8,
-            fg_color=("#7A4D1D", "#7A3F10") if scan else ("#2D6E4E", "#1F5C3A"))
+        text = self.model.mode.value.upper()
+        if self.mode_badge.cget("text") != text:     # reconfigure only on change (#8, #14)
+            self.mode_badge.configure(
+                text=text, padx=8,
+                fg_color=("#7A4D1D", "#7A3F10") if scan else ("#2D6E4E", "#1F5C3A"))
         _set_state((self.btn_load,), not busy)
 
     # ── Pages to Process (§7.5, §11) ──────────────────────────────────────────
@@ -244,10 +248,11 @@ class LeftPanel:
     def _build_same_size_row(self, parent: ctk.CTkBaseClass) -> None:
         self.same_size_row = ctk.CTkFrame(parent, fg_color="transparent")
         ctk.CTkLabel(self.same_size_row, text="Same size", anchor="w", font=self.fonts.base,
-                     width=120).pack(side="left")
+                     width=ROW_LABEL_W).pack(side="left")
         self._same_size_var = tk.BooleanVar(value=self.model.same_size)
         self.switch_same_size = ctk.CTkSwitch(
-            self.same_size_row, text="", variable=self._same_size_var, font=self.fonts.base,
+            self.same_size_row, text="", width=SWITCH_W, variable=self._same_size_var,
+            font=self.fonts.base,
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_same_size(bool(self._same_size_var.get()))))
         self.switch_same_size.pack(side="left")
@@ -256,14 +261,15 @@ class LeftPanel:
     def _build_keep_ratio_row(self, parent: ctk.CTkBaseClass) -> None:
         self.keep_ratio_row = ctk.CTkFrame(parent, fg_color="transparent")
         ctk.CTkLabel(self.keep_ratio_row, text="Keep ratio", anchor="w", font=self.fonts.base,
-                     width=120).pack(side="left")
+                     width=ROW_LABEL_W).pack(side="left")
         self._keep_ratio_var = tk.BooleanVar(value=self.model.keep_ratio)
         self.switch_keep_ratio = ctk.CTkSwitch(
-            self.keep_ratio_row, text="", variable=self._keep_ratio_var, font=self.fonts.base,
-            command=self._on_keep_ratio_toggle)
+            self.keep_ratio_row, text="", width=SWITCH_W, variable=self._keep_ratio_var,
+            font=self.fonts.base, command=self._on_keep_ratio_toggle)
         self.switch_keep_ratio.pack(side="left")
         tooltip(self.switch_keep_ratio, "Lock crop height to width ÷ ratio", self.fonts)
-        self.entry_ratio = ctk.CTkEntry(self.keep_ratio_row, width=70, font=self.fonts.base)
+        self.entry_ratio = ctk.CTkEntry(self.keep_ratio_row, width=RATIO_FIELD_W,
+                                        font=self.fonts.base)
         self.entry_ratio.pack(side="left", padx=(6, 0))
         self.entry_ratio.bind("<Return>", self._commit_ratio)
         self.entry_ratio.bind("<FocusOut>", self._commit_ratio)
@@ -338,7 +344,7 @@ class LeftPanel:
 
     def _refresh_detect(self, busy: bool) -> None:
         m = self.model
-        self.btn_detect.configure(state="normal" if (m.can_detect and not busy) else "disabled")
+        _set_state((self.btn_detect,), m.can_detect and not busy)
         self._anchor_left_var.set(m.anchor_left)
         self._anchor_top_var.set(m.anchor_top)
         _set_state((self.switch_anchor_left, self.switch_anchor_top), not busy)
@@ -363,7 +369,7 @@ class LeftPanel:
         offsets_row.pack(fill="x")
         self.offset_entries: dict[str, ctk.CTkEntry] = {}
         edges: tuple[Literal["L", "T", "R", "B"], ...] = ("L", "T", "R", "B")
-        for i, edge in enumerate(edges):
+        for i, edge in enumerate(edges):        # one line, all four always visible (§7.4a, #1)
             frame, entry = self._build_offset_spinner(offsets_row, edge)
             frame.pack(side="left", padx=(0, 3) if i < 3 else 0)
             self.offset_entries[edge] = entry
@@ -420,8 +426,8 @@ class LeftPanel:
 
     def _refresh_actions(self, busy: bool) -> None:
         m = self.model
-        self.btn_crop.configure(text="✂  Split & Crop" if m.split_count in (2, 4) else "✂  Crop")
-        self.btn_crop.configure(state="normal" if (m.can_apply and not busy) else "disabled")
+        set_text(self.btn_crop, "✂  Split & Crop" if m.split_count in (2, 4) else "✂  Crop")
+        _set_state((self.btn_crop,), m.can_apply and not busy)
         enabled = m.has_document and not busy
         _set_state((self.btn_rotate, self.btn_delete), enabled)
 
@@ -447,8 +453,8 @@ class LeftPanel:
 
     def _refresh_compress(self, busy: bool) -> None:
         m = self.model
-        self.menu_compress.set(m.compress_preset)
-        self.menu_colours.set(m.output_colours)
+        set_menu(self.menu_compress, m.compress_preset)
+        set_menu(self.menu_colours, m.output_colours)
         _set_state((self.menu_compress, self.menu_colours), not busy)
 
     # ── Export (§7.7a, §12.7) ─────────────────────────────────────────────────
@@ -463,8 +469,8 @@ class LeftPanel:
 
     def _refresh_export(self, busy: bool) -> None:
         m = self.model
-        self.btn_export.configure(text=f"💾  Export {m.export_format}")
-        self.menu_format.set(m.export_format)
+        set_text(self.btn_export, f"💾  Export {m.export_format}")
+        set_menu(self.menu_format, m.export_format)
         enabled = m.has_document and not busy
         _set_state((self.btn_export, self.menu_format), enabled)
 

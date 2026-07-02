@@ -64,9 +64,9 @@ def test_keep_ratio_snaps_hand_drawn(model):
     model.set_keep_ratio(True, 2.0)
     model.begin_drag(50, 50, tol=3.0)
     model.update_drag(250, 550)
-    model.end_drag()
-    snap = model.view_snapshot()
-    assert snap.page_w / snap.page_h == pytest.approx(2.0, abs=0.05)
+    model.end_drag()                                 # → live drawn window, snapped (§9.4)
+    win = _overlay(model)[0]
+    assert win.width / win.height == pytest.approx(2.0, abs=0.05)
 
 
 def test_keep_ratio_snaps_crop_edit(model, run_job):
@@ -163,6 +163,56 @@ def test_jump_out_of_range_is_noop(model):
     model.current_page = 5
     model.jump_to_output_page(99999)
     assert model.current_page == 5
+
+
+# ── edge cases (§20) ─────────────────────────────────────────────────────────────
+def test_bad_patterns_never_crash_or_leak_out_of_range(model, select):
+    for pattern in ("0", "abc", "5-2", "", "999", "1-0", ":::", "-3"):
+        select(model, pattern)
+        pages = model.resolve_pages()
+        assert all(0 <= p < model.page_count() for p in pages)
+
+
+def test_navigation_stops_at_both_bounds(model):
+    model.prev_page()
+    assert (model.current_page, model.view_box) == (0, 0)
+    model.jump_to_output_page(model.view_total)
+    model.next_page()
+    assert model.view_position + 1 == model.view_total
+
+
+def test_draw_beyond_page_edges_is_clamped(model):
+    snap = model.view_snapshot()
+    model.begin_drag(-100.0, -100.0, tol=3.0)
+    model.update_drag(snap.page_w + 100, snap.page_h + 100)
+    model.end_drag()
+    win = model.view_snapshot().overlay[0].box
+    assert win.x0 >= 0 and win.y0 >= 0
+    assert win.x1 <= snap.page_w + 1e-6 and win.y1 <= snap.page_h + 1e-6
+
+
+def test_tiny_draw_is_discarded(model):
+    model.begin_drag(50, 50, tol=3.0)
+    model.update_drag(53, 53)                        # < 2·MIN_RECT
+    model.end_drag()
+    assert model.view_snapshot().overlay == ()
+
+
+def test_undo_depth_clamps_to_one(model):
+    model.set_undo_depth(0)
+    model.rotate_pages()
+    model.rotate_pages()
+    model.undo()
+    assert model.can_undo is False                   # depth 0 → clamped to 1 snapshot
+
+
+def test_nonpositive_ratio_never_snaps_or_crashes(model):
+    model.set_keep_ratio(True, 0.0)                  # invalid lock value → effectively no lock
+    model.begin_drag(50, 50, tol=3.0)
+    model.update_drag(250, 550)
+    model.end_drag()
+    win = model.view_snapshot().overlay[0].box
+    assert (win.width, win.height) == pytest.approx((200, 500))
 
 
 def test_status_text_shows_split_index(model):

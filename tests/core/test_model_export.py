@@ -5,6 +5,8 @@ from __future__ import annotations
 import fitz
 from PIL import Image
 
+from core.enums import FilterMode
+
 
 def _commit_page0(m, run_job):
     run_job(m.detect_content())
@@ -32,7 +34,7 @@ def test_compress_downsamples_below_native(loaded, run_job):
     _commit_page0(m, run_job)
     m.set_compress_preset("Original resolution")
     native = m.view_snapshot().image.size
-    m.set_compress_preset("Low — 72 dpi")             # below the 150-dpi native render
+    m.set_compress_preset("Low — 75 dpi")             # below the 150-dpi native render
     low = m.view_snapshot().image.size
     assert low[0] < native[0] and low[1] < native[1]
 
@@ -87,13 +89,31 @@ def test_suggested_export_name_uses_postfix_and_folder(loaded):
     assert name.endswith("_trimmed.jpg")
 
 
+# ── PDF embed encoder: JPEG for tone, PNG for bilevel (§12.6) ────────────────────
+def _first_embed_ext(path):
+    d = fitz.open(str(path))
+    xref = d.get_page_images(0)[0][0]
+    ext = d.extract_image(xref)["ext"]
+    d.close()
+    return ext
+
+
+def test_pdf_embeds_jpeg_for_tone_and_png_for_bilevel(scanned, run_job, tmp_path):
+    m = scanned(1)
+    run_job(m.export(tmp_path / "tone.pdf"))
+    assert _first_embed_ext(tmp_path / "tone.pdf") in ("jpeg", "jpg")
+    run_job(m.set_filter_mode(FilterMode.BW))        # B/W page must stay lossless
+    run_job(m.export(tmp_path / "bw.pdf"))
+    assert _first_embed_ext(tmp_path / "bw.pdf") == "png"
+
+
 # ── output settings survive Undo (inv 22 corollary; §22) ─────────────────────────
 def test_output_settings_survive_undo(loaded, run_job):
     m = loaded(2)
     _commit_page0(m, run_job)
-    m.set_compress_preset("Low — 72 dpi")
+    m.set_compress_preset("Low — 75 dpi")
     m.set_output_colours("Grayscale")
     m.rotate_pages()                                   # a real undoable mutation
     m.undo()
-    assert m.compress_preset == "Low — 72 dpi"         # live settings outside History
+    assert m.compress_preset == "Low — 75 dpi"         # live settings outside History
     assert m.output_colours == "Grayscale"

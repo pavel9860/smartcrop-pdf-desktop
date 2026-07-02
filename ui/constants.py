@@ -22,8 +22,17 @@ PANEL_WIDTH = 320
 SETTINGS_MIN_W = 520
 
 # ── timings ────────────────────────────────────────────────────────────────────────────────────
-STATUS_IDLE_MS = 2400
 SCALE_THROTTLE_MS = 80
+
+# ── canvas paint (§17 preview lever, §19 status) ──────────────────────────────────────────────
+PHOTO_CACHE = 6          # fitted page bitmaps kept resident — nav/drag skips the resample
+STATUS_PAD = 8           # position text inset from the page image's bottom-left corner (px)
+
+# ── compact control rows (§7.4, §7.4a) ────────────────────────────────────────────────────────
+OFFSET_FIELD_W = 48      # one-line L T R B offset entries — all four visible in the panel
+RATIO_FIELD_W = 110      # Keep-ratio value entry — four significant digits, no clipping
+ROW_LABEL_W = 90         # label column of the Same-size / Keep-ratio rows
+SWITCH_W = 44            # CTkSwitch width in those rows (default 100 starves the entry)
 
 # ── UI scale / font (Settings, §15) ──────────────────────────────────────────────────────────
 UI_SCALE_MIN = 0.7
@@ -37,7 +46,7 @@ DEFAULT_FONT_SIZE = 15
 # DEFAULT_FONT_SIZE's live Settings override, only its default value.
 SPLIT_BADGE_FONT_SIZE = round(DEFAULT_FONT_SIZE * 1.3)     # 30% bigger than the base UI font
 SPLIT_BADGE_R = round(SPLIT_BADGE_FONT_SIZE * 0.8)         # circle radius, fits a 1-2 digit number
-SPLIT_BADGE_MARGIN = 4                                      # gap from the window corner to the circle
+SPLIT_BADGE_MARGIN = 4                                      # gap from window corner to the circle
 CANVAS_STATUS_FONT_SIZE = DEFAULT_FONT_SIZE                 # status text drawn directly on canvas
 
 # ── palette: warm-gray chrome + a clear blue accent (§19) ───────────────────────────────────

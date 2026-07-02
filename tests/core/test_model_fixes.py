@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 
 import fitz
+import pytest
 from PIL import Image
 
 from core.constants import OFFSET_LIMIT
@@ -18,22 +19,26 @@ def _box(model, page=None):
     return ov[0].box if ov else None
 
 
-# TEST A — a split miss-click must NOT drop committed crops (FIX 1)
+# TEST A — a split miss-click must NOT drop committed crops (FIX 1; inv 26)
 def test_split_missclick_keeps_committed_crop(model):
     model.set_split(2)
     model.apply_crop()
-    model.current_page = 0
-    original = list(model.document.applied[0])
-    model.begin_drag(-50.0, -50.0, tol=1.0)      # outside every split rectangle → nothing grabbed
+    model.current_page, model.view_box = 0, 0
+    total = model.view_total
+    w = model.view_snapshot().page_w             # committed output-page width
+    model.begin_drag(-50.0, -50.0, tol=1.0)      # off-page press → nothing grabbed
     model.end_drag()
-    assert model.document.applied[0] == original  # the committed split is restored, not discarded
+    assert model.view_total == total             # committed split kept, not discarded
+    assert model.view_snapshot().page_w == pytest.approx(w)
+    assert model.view_snapshot().overlay == ()   # still shown as its committed output page
 
 
 # TEST B — view_snapshot() must not mutate view_box (FIX 2)
 def test_view_snapshot_is_side_effect_free(model):
-    model.begin_drag(50.0, 50.0, tol=3.0)        # commit a single-box crop on page 0
+    model.begin_drag(50.0, 50.0, tol=3.0)        # draw a window on page 0 …
     model.update_drag(250.0, 550.0)
     model.end_drag()
+    model.apply_crop()                           # … and commit it (§12.2)
     model.current_page = 0
     model.view_box = 99                          # deliberately stale
     model.view_snapshot()

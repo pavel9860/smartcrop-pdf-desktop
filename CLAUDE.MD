@@ -106,7 +106,7 @@ overlay: tuple[OverlayBox, ...]   # empty on a committed page
 draw_rect: Box | None             # live rubber-band
 position: int           # 1-based output-page position
 total: int              # output-page total
-status: str             # e.g. "page 3 / 12" or "page 3 / 12  (page 2 split 1/2)"
+status: str             # e.g. "3 / 12" or "3 / 12  (page 2 split 1/2)" — §6 position text
 ```
 
 ## BatchJob protocol (what dispatch_job drives)

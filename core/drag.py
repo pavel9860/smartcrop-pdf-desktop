@@ -38,14 +38,22 @@ class SplitDrag:
 
 @dataclass(frozen=True)
 class DrawDrag:
-    """Rubber-band a new crop on an uncommitted single-crop page (§9.4)."""
+    """Rubber-band a new drawn crop window on an uncommitted page (§9.4) — not a commit."""
+    start: Point
+
+
+@dataclass(frozen=True)
+class WindowDrag:
+    """Resize (handle set) or move (handle None) the page's drawn crop window (§9.4)."""
+    handle: str | None
+    rect0: Box
     start: Point
 
 
 @dataclass(frozen=True)
 class CropEditDrag:
-    """Rubber-band a tightening crop within a committed single-crop page (§9.3)."""
+    """Rubber-band a tightening crop within a committed page (§9.3)."""
     start: Point
 
 
-DragState = AutoDrag | SplitDrag | DrawDrag | CropEditDrag
+DragState = AutoDrag | SplitDrag | DrawDrag | WindowDrag | CropEditDrag

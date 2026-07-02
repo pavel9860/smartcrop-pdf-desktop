@@ -10,7 +10,6 @@ model. `Settings` (live output/behaviour) sits outside History, so Compress/colo
 from __future__ import annotations
 
 import os
-import random
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -19,26 +18,23 @@ from typing import Any, Literal, TypeVar
 import cv2
 import fitz
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 import core.imaging
-from core import render, viewmodel
+from core import detect, export, render, synthetic, viewmodel
 from core.batch import BatchJob, PageJob
 from core.constants import (
     CACHE_WINDOW,
     CLEAN_AMOUNT,
-    DETECT_MAX_PX,
     DPI_PRESETS,
     FULL_PAGE_FRAC,
-    JPEG_QUALITY,
     MODE_TEXT_MIN,
     NORMAL_DPI,
     OFFSET_LIMIT,
     SRC_DPI,
-    SYNTH_PAGES,
 )
 from core.document_state import DocumentState, Offsets, PageProcessIntent
-from core.drag import AutoDrag, CropEditDrag, DragState, DrawDrag, SplitDrag
+from core.drag import AutoDrag, CropEditDrag, DragState, DrawDrag, SplitDrag, WindowDrag
 from core.enums import FilterMode, Mode, PagesMode
 from core.errors import (
     DeleteAllPagesError,
@@ -66,7 +62,6 @@ from core.lru import LRUCache
 from core.parsing import pages_for_mode
 from core.settings import Settings
 
-_FMT_EXT = {"PDF": "pdf", "JPG": "jpg", "PNG": "png", "TIFF": "tif"}
 _T = TypeVar("_T")
 
 
@@ -110,8 +105,8 @@ class AppModel:
         self.work_cache = LRUCache(CACHE_WINDOW)
         self.drag: DragState | None = None
         self.draw_rect: Box | None = None
-        self.prev_applied: list[Box] | None = None
         self._drag_moved = False
+        self._out_cache = LRUCache(CACHE_WINDOW)  # committed output images, (page, vb)-keyed (§17)
         self.doc: Any = None                      # fitz.Document | None (fitz is untyped)
         self.input_paths: list[str] = []
         self.page_sizes: list[tuple[float, float]] = []
@@ -172,9 +167,7 @@ class AppModel:
     def _load_synthetic(self) -> None:
         self.doc = None
         self.input_paths = []
-        rnd = random.Random(7)
-        self.page_sizes = [(600 + rnd.uniform(-15, 15), 820 + rnd.uniform(-20, 20))
-                           for _ in range(SYNTH_PAGES)]
+        self.page_sizes = synthetic.page_sizes()
         self._reset_doc_state()
         self.mode = Mode.NORMAL
 
@@ -190,7 +183,7 @@ class AppModel:
         self.ratio = None
         self.drag = None
         self.draw_rect = None
-        self.prev_applied = None
+        self._out_cache.clear()
 
     def page_count(self) -> int:
         return len(self.page_sizes)
@@ -224,7 +217,8 @@ class AppModel:
             pm = self.doc[idx].get_pixmap(dpi=dpi, alpha=False)
             img = Image.frombytes("RGB", (pm.width, pm.height), pm.samples)
         else:
-            img = self._synthetic_image(idx)
+            w, h = self.page_sizes[idx]
+            img = synthetic.page_image(idx, w, h, self.mode == Mode.SCANNED)
         ang = self.document.rotation.get(idx, 0)
         if ang:
             img = img.rotate(-ang, expand=True)       # PIL rotates CCW; -ang = clockwise
@@ -258,38 +252,15 @@ class AppModel:
         return img
 
     def _dewarp_bgr(self, bgr: Any) -> Any:
+        """Mesh unwarp at the supersample setting (§10.1); ANY inference failure — missing dep,
+        ONNX runtime error, bad model — degrades to plain auto-deskew with a warning, so the
+        batch never dies on a dewarp failure (inv 30)."""
         if core.imaging.unwarp_available():
             try:
-                return core.imaging.unwarp_bgr(bgr)
-            except (RuntimeError, OSError) as exc:   # ONNX/docuwarp inference failed → deskew-only
+                return core.imaging.unwarp_supersampled(bgr, self.settings.dewarp_supersample)
+            except Exception as exc:
                 warnings.warn(f"dewarp failed, falling back to deskew: {exc}", stacklevel=2)
         return core.imaging.deskew_auto(bgr)[0]
-
-    def _synthetic_text_box(self, idx: int, w: float, h: float) -> Box:
-        rnd = random.Random(idx * 17 + 3)
-        return Box(w * (0.09 + rnd.uniform(-0.02, 0.03)), h * (0.10 + rnd.uniform(-0.02, 0.03)),
-                   w * (1 - 0.09 - rnd.uniform(-0.02, 0.03)),
-                   h * (1 - 0.13 - rnd.uniform(-0.03, 0.03)))
-
-    def _synthetic_image(self, idx: int) -> Image.Image:
-        w, h = self.page_sizes[idx]
-        img = Image.new("RGB", (int(w), int(h)), "white")
-        dr = ImageDraw.Draw(img)
-        rnd = random.Random(idx * 31 + 1)
-        box = self._synthetic_text_box(idx, w, h)
-        if self.mode == Mode.NORMAL:
-            y = box.y0
-            while y < box.y1 - 10:
-                dr.line([(box.x0, y), (box.x1 - rnd.uniform(0, w * 0.18), y)],
-                        fill=(70, 70, 75), width=2)
-                y += rnd.uniform(14, 20)
-            dr.rectangle([box.x0, box.y0, box.x1, box.y1], outline=(210, 210, 215))
-            return img
-        dr.rectangle([box.x0, box.y0, box.x1, box.y1], fill=(60, 60, 65))
-        for _ in range(40):
-            x, yy = rnd.uniform(box.x0, box.x1), rnd.uniform(box.y0, box.y1)
-            dr.ellipse([x, yy, x + 3, yy + 3], fill=(230, 230, 225))
-        return img.rotate(rnd.uniform(-5, 5), fillcolor="white", resample=Image.Resampling.BICUBIC)
 
     # ── pages selection ──────────────────────────────────────────────────────
     def resolve_pages(self) -> list[int]:
@@ -336,32 +307,14 @@ class AppModel:
         w, h = self._page_dims(idx)
         if self.mode == Mode.NORMAL:
             if self.doc is not None:
-                blocks = [b for b in self.doc[idx].get_text("blocks")
-                          if b[6] == 0 and b[4].strip()]
-                if blocks:
-                    return Box(min(b[0] for b in blocks), min(b[1] for b in blocks),
-                               max(b[2] for b in blocks), max(b[3] for b in blocks))
-                return Box(0, 0, w, h)
-            return self._synthetic_text_box(idx, w, h)
-        bgr = cv2.cvtColor(np.array(self._work_image(idx)), cv2.COLOR_RGB2BGR)
-        g0h, g0w = bgr.shape[:2]
-        s = min(1.0, DETECT_MAX_PX / max(g0h, g0w))
-        if s < 1.0:
-            bgr = cv2.resize(bgr, (max(1, round(g0w * s)), max(1, round(g0h * s))),
-                             interpolation=cv2.INTER_AREA)
-        gh, gw = bgr.shape[:2]
-        bw = core.imaging.clean_document_bilevel(bgr, strength=2, upscale=1.0)
-        t = core.imaging.content_box(bw)
-        if t is None:
-            return Box(0, 0, w, h)
-        sx, sy = w / gw, h / gh
-        return Box(t[0] * sx, t[1] * sy, t[2] * sx, t[3] * sy)
+                return detect.normal_page_box(self.doc, idx, w, h)
+            return synthetic.text_box(idx, w, h)
+        return detect.scanned_page_box(self._work_image(idx), w, h)
 
     def _finish_detect(self, results: dict[int, Box]) -> None:
         d = self.document
         recommit = [i for i in results if i in d.applied]
-        if recommit:
-            self.history.push(d)            # refreshing committed crops is undoable (§7.4)
+        self.history.push(d)                # every detect press is one undoable step (§13, inv 27)
         d.detect_cache.update(results)
         good = [b for i, b in results.items()
                 if b.width < FULL_PAGE_FRAC * self._page_dims(i)[0]
@@ -509,6 +462,7 @@ class AppModel:
         def commit() -> None:
             d = self.document
             self.history.push(d)
+            self._out_cache.clear()               # work rasters change under unchanged boxes
             for i, intent in intents.items():
                 d.processed[i] = intent
                 self.work_cache[i] = computed[i]
@@ -528,11 +482,16 @@ class AppModel:
             raise ImagingError(f"Page {i + 1}: processing failed ({exc}).") from exc
 
     # ── apply / rotate / delete (§12.2, §13) ─────────────────────────────────
-    def _page_crop_boxes(self, i: int) -> list[Box]:
+    def _page_crop_boxes(self, i: int) -> list[Box] | None:
+        """Page i's crop source: split rectangles, else its drawn window, else the live auto
+        crop — None when the page has no source at all (§12.2: skipped, never full-page)."""
         if self.split_count > 1:
             return list(self.document.crop_rects)
-        w, h = self._page_dims(i)
-        return [self._crop_rect(i) or Box(0, 0, w, h)]
+        drawn = self.document.drawn.get(i)
+        if drawn is not None:
+            return [drawn]
+        rect = self._crop_rect(i)
+        return [rect] if rect is not None else None
 
     def apply_crop(self) -> None:
         if self.page_count() == 0:
@@ -542,10 +501,18 @@ class AppModel:
         indices = self.resolve_pages()
         if not indices:
             raise EmptySelectionError("Empty Pages selection.")
+        commits = {i: b for i in indices if (b := self._page_crop_boxes(i)) is not None}
+        if not commits:
+            return                          # no source anywhere → no-op (inv 25)
         self.history.push(self.document)
-        for i in indices:
-            self.document.applied[i] = self._page_crop_boxes(i)
+        for i, boxes in commits.items():
+            self.document.applied[i] = boxes
+            self.document.drawn.pop(i, None)     # the window became the crop (§12.2)
         self._clamp_view_box()
+
+    def _has_crop_source(self) -> bool:
+        """A live auto crop exists: detection ran and ≥ 1 anchor is ON (§7.7, §12.2)."""
+        return self.document.auto_active and (self.anchor_left or self.anchor_top)
 
     def rotate_pages(self) -> None:
         if self.page_count() == 0:
@@ -555,6 +522,7 @@ class AppModel:
             raise EmptySelectionError("Empty Pages selection.")
         d = self.document
         self.history.push(d)
+        self._out_cache.clear()                  # rasters re-render at the new angle
         for i in indices:
             w, h = self._page_dims(i)            # page size BEFORE this 90° step
             d.rotation[i] = (d.rotation.get(i, 0) + 90) % 360
@@ -562,6 +530,8 @@ class AppModel:
             self.work_cache.pop(i, None)
             if i in d.applied:                   # carry the committed crop through the turn
                 d.applied[i] = [rotate_box_cw(b, w, h) for b in d.applied[i]]
+            if i in d.drawn:                     # the drawn window turns with its page (§13)
+                d.drawn[i] = rotate_box_cw(d.drawn[i], w, h)
             if i in d.detect_cache:
                 d.detect_cache[i] = rotate_box_cw(d.detect_cache[i], w, h)
         if d.auto_active and d.detect_cache:
@@ -569,6 +539,8 @@ class AppModel:
             d.offsets = Offsets()                # L/T/R/B map to rotated edges → reset to 0
             if not self.keep_ratio:
                 self.ratio = d.union.width / d.union.height if d.union.height else None
+        if self.split_count > 1:                 # re-lay the split grid on the rotated page (§13)
+            self._auto_layout_split(self.split_count)
 
     def delete_pages(self) -> None:
         if self.page_count() == 0 or self.doc is None:
@@ -585,9 +557,11 @@ class AppModel:
         d = self.document
         self.source_cache.clear()
         self.work_cache.clear()
+        self._out_cache.clear()
         d.detect_cache = _reindex(d.detect_cache, deleted)
         d.processed = _reindex(d.processed, deleted)
         d.applied = _reindex(d.applied, deleted)
+        d.drawn = _reindex(d.drawn, deleted)
         d.rotation = _reindex(d.rotation, deleted)
         if d.auto_active and d.detect_cache:
             d.union = union_box(list(d.detect_cache.values()))
@@ -612,6 +586,7 @@ class AppModel:
         self.document = state
         self.source_cache.clear()                # rotation may differ → re-render rasters
         self.work_cache.clear()
+        self._out_cache.clear()
         self.view_box = 0
 
     def set_compress_preset(self, name: str) -> None:
@@ -646,8 +621,9 @@ class AppModel:
         w, h = self._page_dims(i)
         if i in self.document.applied:
             boxes = self.document.applied[i]
-        else:
-            cb = self._crop_rect(i) if self.split_count == 1 else None
+        else:                                    # §12.4: drawn window, else live auto, else whole
+            cb = (self.document.drawn.get(i) or self._crop_rect(i)
+                  if self.split_count == 1 else None)
             boxes = [cb] if cb is not None else [Box(0, 0, w, h)]
         rc = self._remove_colours()
         return [render.output_image(work, box, w, h, self._target_size(box.width, box.height), rc)
@@ -656,7 +632,7 @@ class AppModel:
     def suggested_export_name(self) -> tuple[str, str]:
         base = (os.path.splitext(os.path.basename(self.input_paths[0]))[0]
                 if self.input_paths else "output")
-        ext = _FMT_EXT[self.settings.export_format]
+        ext = export.FMT_EXT[self.settings.export_format]
         folder = self.settings.output_folder.strip() or (
             os.path.dirname(self.input_paths[0]) if self.input_paths else "")
         return (f"{base}{self.settings.output_postfix}.{ext}", folder)
@@ -667,13 +643,22 @@ class AppModel:
         indices = self.resolve_pages()
         if not indices:
             raise EmptySelectionError("Empty Pages selection.")
-        for i in indices:                        # commit the live/split crop first (§12.4)
+        for i in indices:                        # commit the drawn/live/split crop first (§12.4)
             if self.split_count > 1 or i not in self.document.applied:
-                self.document.applied[i] = self._page_crop_boxes(i)
+                boxes = self._page_crop_boxes(i)
+                if boxes is not None:            # sourceless pages stay whole, never full-boxed
+                    self.document.applied[i] = boxes
+                    self.document.drawn.pop(i, None)
         pages = list(range(self.page_count()))
         if self.settings.export_format == "PDF":
-            return self._export_pdf_job(path, pages)
-        return self._export_images_job(path, pages, self.settings.export_format)
+            return export.pdf_job(path, pages, self._render_page_outputs, self._page_is_bilevel)
+        return export.images_job(path, pages, self.settings.export_format,
+                                 self._render_page_outputs)
+
+    def _page_is_bilevel(self, i: int) -> bool:
+        """B/W-filtered pages embed PNG in the PDF; everything else embeds JPEG (§12.6)."""
+        intent = self.document.processed.get(i, PageProcessIntent())
+        return intent.filter is not None and intent.filter[0] == FilterMode.BW
 
     def _render_page_outputs(self, i: int) -> list[Image.Image]:
         try:
@@ -681,74 +666,32 @@ class AppModel:
         except Exception as exc:
             raise ImagingError(f"Page {i + 1}: render failed ({exc}).") from exc
 
-    def _export_pdf_job(self, path: Path, pages: list[int]) -> BatchJob:
-        out_doc = fitz.open()
-
-        def step(i: int) -> None:                # one page of pixels resident at a time (§12.5)
-            for img in self._render_page_outputs(i):
-                pg = out_doc.new_page(width=img.width, height=img.height)
-                pg.insert_image(pg.rect, stream=render.pil_to_png_bytes(img))
-
-        def save() -> None:
-            try:
-                out_doc.save(str(path), garbage=4, deflate=True)   # garbage-collect + deflate
-            except (OSError, RuntimeError) as exc:    # disk full / bad path → routed via Failed
-                raise ImagingError(f"Export failed: {exc}") from exc
-            finally:
-                out_doc.close()
-
-        def discard() -> None:                # cancel before save → drop the in-progress doc
-            if not out_doc.is_closed:
-                out_doc.close()
-
-        return PageJob("Exporting pages", pages, step, save, discard)
-
-    def _export_images_job(self, path: Path, pages: list[int], fmt: str) -> BatchJob:
-        stem, ext = os.path.splitext(str(path))[0], _FMT_EXT[fmt]
-        count = 0
-        written: list[str] = []
-
-        def step(i: int) -> None:
-            nonlocal count
-            for img in self._render_page_outputs(i):
-                count += 1
-                p = f"{stem}_{count:03d}.{ext}"
-                if fmt == "JPG":
-                    img.save(p, "JPEG", quality=JPEG_QUALITY)
-                elif fmt == "PNG":
-                    img.save(p, "PNG")
-                else:
-                    img.save(p, "TIFF", compression="tiff_deflate")
-                written.append(p)
-
-        def discard() -> None:                # cancel/failure → delete the files already written
-            for p in written:
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-
-        return PageJob(f"Exporting {fmt}", pages, step, on_abort=discard)
-
     # ── gesture (page-unit coords from ui/canvas_view; tol is the page-unit hit radius) ──────
     def begin_drag(self, px: float, py: float, tol: float) -> None:
         if self.page_count() == 0:
             return
         self._drag_moved = False
         self.draw_rect = None
-        applied = self.document.applied.get(self.current_page)
-        if applied and self.split_count == 1:
-            self.drag = CropEditDrag((px, py))   # edit within the committed view (§9.3)
+        if self.document.applied.get(self.current_page):
+            # Any committed page — single or split — stays shown cropped; the only gesture is
+            # drawing a new rectangle inside the shown output page (§9.3, §9.6, inv 26). The
+            # coordinates stay in the output box's own units; windows are never re-exposed.
+            self.drag = CropEditDrag((px, py))
             return
-        self.prev_applied = self.document.applied.pop(self.current_page, None)
-        if self.prev_applied is not None:
-            self.view_box = 0                    # committed split → edit on the full page
         if self.split_count > 1:
             self._begin_split(px, py, tol)
         else:
             self._begin_auto(px, py, tol)
 
     def _begin_auto(self, px: float, py: float, tol: float) -> None:
+        drawn = self.document.drawn.get(self.current_page)
+        if drawn is not None:                    # the drawn window overrides the auto frame (§9.4)
+            handle = hit_handle(drawn, px, py, tol)
+            if handle is not None or point_in_box(drawn, px, py):
+                self.drag = WindowDrag(handle, drawn, (px, py))
+            else:
+                self.drag = DrawDrag((px, py))   # outside → rubber-band a replacement window
+            return
         box = self._crop_rect(self.current_page)
         w, h = self._page_dims(self.current_page)
         d = self.document
@@ -761,7 +704,7 @@ class AppModel:
         elif box is not None and point_in_box(box, px, py):
             self.drag = AutoDrag(None, box, (px, py), w, h, d.offsets, ab.x0, ab.y0)
         else:
-            self.drag = DrawDrag((px, py))       # empty area → rubber-band a new crop (§9.4)
+            self.drag = DrawDrag((px, py))       # empty area → rubber-band a new window (§9.4)
 
     def _begin_split(self, px: float, py: float, tol: float) -> None:
         for i, box in enumerate(self.document.crop_rects):
@@ -794,6 +737,14 @@ class AppModel:
                 w, h = self._page_dims(self.current_page)
                 self.document.crop_rects[d.idx] = move_box(
                     d.rect0, px - d.start[0], py - d.start[1], w, h)
+            case WindowDrag(handle=str() as handle):
+                w, h = self._page_dims(self.current_page)
+                self.document.drawn[self.current_page] = resize_by_handle(
+                    d.rect0, handle, px - d.start[0], py - d.start[1], w, h)
+            case WindowDrag():
+                w, h = self._page_dims(self.current_page)
+                self.document.drawn[self.current_page] = move_box(
+                    d.rect0, px - d.start[0], py - d.start[1], w, h)
             case DrawDrag() | CropEditDrag():
                 bw, bh = self._drag_view_dims()
                 sx, sy = d.start
@@ -814,7 +765,7 @@ class AppModel:
 
     def _drag_view_dims(self) -> tuple[float, float]:
         applied = self.document.applied.get(self.current_page)
-        if applied and self.split_count == 1:    # crop-edit coords live in the committed box
+        if applied:                              # crop-edit coords live in the committed box
             box = applied[min(self.view_box, len(applied) - 1)]
             return box.width, box.height
         return self._page_dims(self.current_page)
@@ -826,33 +777,21 @@ class AppModel:
             case SplitDrag():
                 self._finish_split_drag(d)
             case DrawDrag():
-                self._commit_drawn_rect()
+                self._finish_draw()
+            case WindowDrag():
+                self._finish_window_drag()
             case CropEditDrag():
                 self._commit_crop_edit()
-            case AutoDrag():
-                pass                             # live auto crop already updated via offsets
-            case None:                           # split miss-click: nothing grabbed → keep the crop
-                if self.prev_applied is not None:
-                    self._restore_prev_applied()
-        self.prev_applied = None
+            case AutoDrag() | None:              # live auto crop already updated via offsets;
+                pass                             # a miss-press grabbed nothing → nothing to do
 
     def _finish_split_drag(self, d: SplitDrag) -> None:
         if not self._drag_moved:
-            if self.prev_applied is not None:
-                self._restore_prev_applied()
             return
         rects = self.document.crop_rects
-        if self.keep_ratio:                      # snap the dragged window to the ratio (§9.7)
-            ratio = self._active_ratio()
-            if ratio:
-                box = rects[d.idx]
-                _, h = self._page_dims(self.current_page)
-                rects[d.idx] = Box(box.x0, box.y0, box.x1,
-                                   box.y0 + min(box.width / ratio, h - box.y0))
+        rects[d.idx] = self._snap_ratio(rects[d.idx])    # Keep-ratio snap on release (§9.7)
         if self.same_size:
             self._apply_same_size(d.idx)
-        if self.prev_applied is not None:        # an edited committed split stays committed
-            self.document.applied[self.current_page] = list(rects)
 
     def _apply_same_size(self, src: int) -> None:
         rects = self.document.crop_rects
@@ -867,62 +806,71 @@ class AppModel:
             y0 = min(box.y0, max(0.0, h - th))
             rects[j] = Box(x0, y0, min(w, x0 + tw), min(h, y0 + th))
 
-    def _commit_drawn_rect(self) -> None:
+    def _finish_draw(self) -> None:
+        """A released rubber-band becomes the page's live drawn window — never a commit (§9.4).
+        No history snapshot: like a split-rectangle drag, this is crop *setup*; Crop commits."""
         r = self.draw_rect
         self.draw_rect = None
         if r is None or r.width < 2 * MIN_RECT or r.height < 2 * MIN_RECT:
-            if self.prev_applied is not None:    # aborted draw → keep the existing crop (§9.5)
-                self._restore_prev_applied()
-            return
-        if self.keep_ratio:                      # snap a hand-drawn rect to the ratio (§9.7)
-            ratio = self._active_ratio()
-            if ratio:
-                r = Box(r.x0, r.y0, r.x1, r.y0 + r.width / ratio)
-        self.history.push(self.document)
-        self.document.applied[self.current_page] = [r]
-        self._clamp_view_box()
+            return                               # aborted draw → nothing placed (§9.5)
+        self.document.drawn[self.current_page] = self._snap_ratio(r)
+
+    def _finish_window_drag(self) -> None:
+        """Snap the adjusted drawn window to the Keep-ratio lock on release (§9.7)."""
+        page = self.current_page
+        drawn = self.document.drawn.get(page)
+        if drawn is not None:
+            self.document.drawn[page] = self._snap_ratio(drawn)
+
+    def _snap_ratio(self, r: Box) -> Box:
+        if not self.keep_ratio:
+            return r
+        ratio = self._active_ratio()
+        if not ratio:
+            return r
+        _, h = self._page_dims(self.current_page)
+        return Box(r.x0, r.y0, r.x1, min(r.y0 + r.width / ratio, h))
 
     def _commit_crop_edit(self) -> None:
+        """Re-commit the shown output box tightened to the drawn rectangle — the one gesture a
+        committed page accepts (§9.3, §9.6 inv 26). On a committed split page only the current
+        window changes; its siblings and the split layout stay untouched."""
         cur = self.document.applied.get(self.current_page)
         r = self.draw_rect
         self.draw_rect = None
         if not cur or r is None or r.width < 2 * MIN_RECT or r.height < 2 * MIN_RECT:
             return                               # nothing valid → keep the committed crop (§9.5)
-        box = cur[0]                             # r is in the committed box's units → offset in
+        vb = max(0, min(self.view_box, len(cur) - 1))
+        box = cur[vb]                            # r is in the committed box's units → offset in
         new = Box(box.x0 + r.x0, box.y0 + r.y0, box.x0 + r.x1, box.y0 + r.y1)
         if self.keep_ratio:
             ratio = self._active_ratio()
             if ratio:
                 new = Box(new.x0, new.y0, new.x1, new.y0 + new.width / ratio)
         self.history.push(self.document)
-        self.document.applied[self.current_page] = [new]
-        self.view_box = 0
-
-    def _restore_prev_applied(self) -> None:
-        if self.prev_applied is not None:
-            self.document.applied[self.current_page] = self.prev_applied
-        self.prev_applied = None
-        self._clamp_view_box()
+        boxes = list(cur)
+        boxes[vb] = new
+        self.document.applied[self.current_page] = boxes
 
     def cancel_drag(self) -> None:
-        """Esc / right-click mid-drag (§9.3, §9.6): discard the gesture, commit nothing, take no
-        snapshot, leave the crop exactly as before the drag began (§22 inv 24)."""
+        """Esc / right-click. Mid-drag (§9.3, §9.6): discard the gesture, commit nothing, take no
+        snapshot, leave the crop exactly as before the drag began. Outside a drag: drop the
+        current page's drawn window if it has one; otherwise change nothing (§9.4, inv 24)."""
         d = self.drag
         if d is None and self.draw_rect is None:
+            self.document.drawn.pop(self.current_page, None)
             return
         self.draw_rect = None
         self.drag = None
         match d:
             case SplitDrag():
                 self.document.crop_rects[d.idx] = d.rect0
+            case WindowDrag():
+                self.document.drawn[self.current_page] = d.rect0
             case AutoDrag():
                 self.document.offsets = d.offsets0
             case _:
                 pass
-        if self.prev_applied is not None:
-            self.document.applied[self.current_page] = self.prev_applied
-            self.prev_applied = None
-            self.view_box = 0
 
     # ── navigation (output pages, §12.3) ─────────────────────────────────────
     def next_page(self) -> None:
@@ -976,12 +924,27 @@ class AppModel:
         if applied:                              # committed → paint the EXACT export image (§12.1)
             vb = max(0, min(self.view_box, len(applied) - 1))   # local clamp — query is pure
             box = applied[vb]
-            image = render.output_image(work, box, w, h, self._target_size(box.width, box.height),
-                                        self._remove_colours())
+            image = self._cached_output(idx, vb, work, box, w, h)
             return ViewSnapshot(image, box.width, box.height, (), self.draw_rect,
                                 self._view_position() + 1, self._view_total(), self._status_text())
         return ViewSnapshot(work, w, h, self._overlay_boxes(), self.draw_rect,
                             self._view_position() + 1, self._view_total(), self._status_text())
+
+    def _cached_output(self, idx: int, vb: int, work: Image.Image, box: Box,
+                       w: float, h: float) -> Image.Image:
+        """Committed-page preview via the one render path, LRU-cached per (page, window) so
+        navigation repaints don't re-crop/resample (§17). The cached entry self-validates against
+        the box / compress target / colour mode; sites that change the *work raster* under an
+        unchanged box (rotate, filters, undo/redo, delete) clear the cache explicitly."""
+        target = self._target_size(box.width, box.height)
+        rc = self._remove_colours()
+        hit: tuple[Box, tuple[float, float] | None, bool, Image.Image] | None = (
+            self._out_cache.get((idx, vb)))
+        if hit is not None and hit[0] == box and hit[1] == target and hit[2] == rc:
+            return hit[3]
+        image = render.output_image(work, box, w, h, target, rc)
+        self._out_cache[(idx, vb)] = (box, target, rc, image)
+        return image
 
     def _clamp_view_box(self) -> None:
         self.view_box = max(0, min(self.view_box, self._page_box_count(self.current_page) - 1))
@@ -990,17 +953,19 @@ class AppModel:
         if self.split_count > 1:
             return tuple(OverlayBox(b, "split", i)
                          for i, b in enumerate(self.document.crop_rects))
-        rect = self._crop_rect(self.current_page)
+        rect = self.document.drawn.get(self.current_page) or self._crop_rect(self.current_page)
         return (OverlayBox(rect, "auto", -1),) if rect is not None else ()
 
     def _status_text(self) -> str:
+        """Output-page position only, e.g. "3 / 312" (+ the §12.3 split annotation) — drawn at
+        the page image's bottom-left corner by the canvas (§6, §19)."""
         total = self._view_total()
         pos = self._view_position() + 1
         cnt = self._page_box_count(self.current_page)
         if cnt > 1:
-            return (f"page {pos} / {total}   "
+            return (f"{pos} / {total}  "
                     f"(page {self.current_page + 1} split {self.view_box + 1}/{cnt})")
-        return f"page {pos} / {total}"
+        return f"{pos} / {total}"
 
     @property
     def has_document(self) -> bool:
@@ -1013,8 +978,13 @@ class AppModel:
 
     @property
     def can_apply(self) -> bool:
-        return self.page_count() > 0 and (
-            self.split_count == 1 or len(self.document.crop_rects) == self.split_count)
+        if self.page_count() == 0:
+            return False
+        if self.split_count > 1:
+            return len(self.document.crop_rects) == self.split_count
+        if self._has_crop_source():         # detect or draw first — the prerequisite for Crop
+            return True
+        return any(i in self.document.drawn for i in self.resolve_pages())
 
     @property
     def auto_active(self) -> bool:

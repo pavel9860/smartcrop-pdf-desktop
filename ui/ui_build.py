@@ -4,6 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import filedialog
+
 import customtkinter as ctk
 
 from core.batch import BatchJob
@@ -13,6 +14,7 @@ from ui.config import UIConfig
 from ui.constants import (
     FONT_SIZE_MAX,
     FONT_SIZE_MIN,
+    OFFSET_FIELD_W,
     THEMES,
     UI_SCALE_MAX,
     UI_SCALE_MIN,
@@ -35,35 +37,48 @@ class Fonts:
 
 
 class Tooltip:
+    """Hover tooltip. The toplevel is created **lazily on first hover** — building ~40 eager
+    toplevels at startup measurably slows construction and flickers on some window managers."""
+
     def __init__(self, widget: ctk.CTkBaseClass, text: str, fonts: Fonts | None = None) -> None:
         self._widget = widget
         self._text = text
-        self._win = ctk.CTkToplevel(widget)
-        self._win.wm_overrideredirect(True)
-        self._win.withdraw()
-        ctk.CTkLabel(self._win, text=text, corner_radius=6, padx=8, pady=4,
-                     fg_color=THEMES["card"],
-                     font=fonts.base if fonts is not None else None).pack()
+        self._fonts = fonts
+        self._win: ctk.CTkToplevel | None = None
         try:
             widget.bind("<Enter>", self._show, add="+")
             widget.bind("<Leave>", self._hide, add="+")
             widget.bind("<Destroy>", self._destroy, add="+")
         except NotImplementedError:
-            self._win.destroy()  # widget doesn't support bind; discard the tooltip
+            pass                     # widget doesn't support bind; no tooltip
+
+    def _build(self) -> ctk.CTkToplevel:
+        win = ctk.CTkToplevel(self._widget)
+        win.wm_overrideredirect(True)
+        win.withdraw()
+        ctk.CTkLabel(win, text=self._text, corner_radius=6, padx=8, pady=4,
+                     fg_color=THEMES["card"],
+                     font=self._fonts.base if self._fonts is not None else None).pack()
+        return win
 
     def _show(self, _event: tk.Event[tk.Misc]) -> None:
         if not self._text:
             return
+        if self._win is None:
+            self._win = self._build()
         x = self._widget.winfo_rootx() + 12
         y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
         self._win.wm_geometry(f"+{x}+{y}")
         self._win.deiconify()
 
     def _hide(self, _event: tk.Event[tk.Misc]) -> None:
-        self._win.withdraw()
+        if self._win is not None:
+            self._win.withdraw()
 
     def _destroy(self, _event: tk.Event[tk.Misc]) -> None:
-        self._win.destroy()
+        if self._win is not None:
+            self._win.destroy()
+            self._win = None
 
 
 def tooltip(widget: ctk.CTkBaseClass, text: str, fonts: Fonts | None = None) -> None:
@@ -88,20 +103,35 @@ def highlight_button(parent: ctk.CTkBaseClass, text: str, command: Callable[[], 
 
 
 def set_active(button: ctk.CTkButton, active: bool) -> None:
-    button.configure(fg_color=THEMES["accent"] if active else THEMES["secondary"],
+    """Highlight/unhighlight, reconfiguring only on a real change — an unconditional configure
+    repaints the widget and makes every refresh blink and drag the scroll (#8, #14)."""
+    fg = THEMES["accent"] if active else THEMES["secondary"]
+    if button.cget("fg_color") == fg:
+        return
+    button.configure(fg_color=fg,
                       hover_color=THEMES["accent_hover"] if active else THEMES["secondary_hover"],
                       text_color=THEMES["accent_text"] if active else THEMES["secondary_text"])
 
 
-def option_menu(parent, fonts, **kwargs):
-    values = kwargs.get("values", [])
-    menu = ctk.CTkOptionMenu(parent, font=fonts.base,
+def set_text(widget: ctk.CTkBaseClass, text: str) -> None:
+    """configure(text=…) only when it changed (same no-repaint rationale as set_active)."""
+    if widget.cget("text") != text:
+        widget.configure(text=text)
+
+
+def set_menu(menu: ctk.CTkOptionMenu, value: str) -> None:
+    """menu.set(…) only when it changed (same no-repaint rationale as set_active)."""
+    if menu.get() != value:
+        menu.set(value)
+
+
+def option_menu(parent: ctk.CTkBaseClass, fonts: Fonts, **kwargs: object) -> ctk.CTkOptionMenu:
+    """Themed option menu; the dropdown list uses the shared base font (#17 — same size as the
+    rest of the UI), via the public `dropdown_font` parameter."""
+    return ctk.CTkOptionMenu(parent, font=fonts.base, dropdown_font=fonts.base,
         fg_color=THEMES["secondary"], button_color=THEMES["secondary"],
         button_hover_color=THEMES["secondary_hover"], text_color=THEMES["secondary_text"],
         **kwargs)
-    if values:
-        menu._dropdown_menu.configure(min_character_width=max(len(v) for v in values))
-    return menu
 
 def labeled_row(parent: ctk.CTkBaseClass, label: str, fonts: Fonts) -> ctk.CTkFrame:
     row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -132,7 +162,7 @@ def offset_spinner(parent: ctk.CTkBaseClass, label: str, value: float,
     frame = ctk.CTkFrame(parent, fg_color="transparent")
     ctk.CTkLabel(frame, text=label, width=16, font=fonts.base,
                  text_color=THEMES["muted"]).pack(side="left")
-    entry = ctk.CTkEntry(frame, width=47, font=fonts.base)
+    entry = ctk.CTkEntry(frame, width=OFFSET_FIELD_W, font=fonts.base)
     entry.insert(0, f"{value:.1f}")
     entry.pack(side="left", padx=(2, 0))
 
@@ -173,15 +203,16 @@ def build_settings_window(parent: ctk.CTk, settings: Settings, ui_config: UIConf
     _scan_section(body, settings, fonts)
 
     win.update_idletasks()
-    # Size to content — no large hardcoded floor
+    # Size to content — no large hardcoded floor; open over the left panel, aligned to the main
+    # window's top-left corner (§15, inv 31).
     w = max(320, body.winfo_reqwidth())
     h = body.winfo_reqheight() + 40
-    win.geometry(f"{w}x{h}")
+    win.geometry(f"{w}x{h}+{parent.winfo_rootx()}+{parent.winfo_rooty()}")
     win.minsize(w, h)
     return win
 
 
-def _seg_kwargs() -> dict:
+def _seg_kwargs() -> dict[str, object]:
     """Shared CTkSegmentedButton theme kwargs."""
     return dict(
         selected_color=THEMES["accent"],
@@ -346,7 +377,9 @@ def _settings_switch(parent: ctk.CTkBaseClass, label: str, on: bool, fonts: Font
 def build_help_window(parent: ctk.CTk, fonts: Fonts) -> ctk.CTkToplevel:
     win = ctk.CTkToplevel(parent)
     win.title("Help & Quick-Start")
-    win.geometry("640x720")
+    # Over the left panel: main window's top-left corner, main window's height (§16, inv 31).
+    height = max(400, parent.winfo_height())
+    win.geometry(f"640x{height}+{parent.winfo_rootx()}+{parent.winfo_rooty()}")
     win.transient(parent)
     win.after(100, lambda: (win.lift(), win.focus_force()))
     ctk.CTkLabel(win, text=INTRO, justify="left", wraplength=580, font=fonts.help).pack(

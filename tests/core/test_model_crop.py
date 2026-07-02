@@ -96,6 +96,79 @@ def test_anchors_off_disable_detect(model):
     assert model.can_detect is True
 
 
+def test_detect_first_press_is_undoable(model, run_job):
+    assert model.can_undo is False
+    run_job(model.detect_content())               # inv 27: one snapshot per press
+    assert model.can_undo is True
+    assert _box(model, 0) is not None
+    model.undo()
+    assert model.auto_active is False             # detection state fully reverted
+    assert _box(model, 0) is None
+    model.redo()
+    assert model.auto_active and _box(model, 0) is not None
+
+
+def test_detect_second_press_is_idempotent(model, run_job):
+    run_job(model.detect_content())
+    model.apply_crop()
+    model.current_page = 0
+    w1 = model.view_snapshot().page_w             # committed → crop width
+    run_job(model.detect_content())               # second press refreshes to the same box
+    assert _committed(model, 0)
+    assert model.view_snapshot().page_w == pytest.approx(w1)
+    model.undo()                                  # inv 27: the press was one clean undo step
+    assert _committed(model, 0)
+    assert model.view_snapshot().page_w == pytest.approx(w1)
+
+
+def test_apply_without_detection_is_noop(model):
+    assert model.can_apply is False               # inv 25: no crop source at split = 1
+    total = model.view_total
+    full_w = model.view_snapshot().page_w
+    model.apply_crop()                            # must commit nothing, snapshot nothing
+    assert model.can_undo is False
+    assert model.view_total == total
+    assert model.view_snapshot().page_w == pytest.approx(full_w)
+    assert model.view_snapshot().overlay == ()    # still uncommitted, no full-page commit
+
+
+def test_can_apply_true_after_detect(model, run_job):
+    run_job(model.detect_content())
+    assert model.can_apply is True
+    model.set_anchor(left=False, top=False)       # no anchor → no live crop → no source
+    assert model.can_apply is False
+
+
+def test_rotate_turns_drawn_window_with_the_page(model):
+    old_h = model.view_snapshot().page_h
+    model.begin_drag(50, 50, tol=3.0)
+    model.update_drag(250, 550)
+    model.end_drag()
+    model.rotate_pages()
+    win = model.view_snapshot().overlay[0].box    # 90° CW: (x0, y0) ← (h − y1, x0)
+    assert win.x0 == pytest.approx(old_h - 550)
+    assert win.y0 == pytest.approx(50)
+    assert win.width == pytest.approx(500)        # old height span
+    assert win.height == pytest.approx(200)       # old width span
+
+
+def test_rotate_relayouts_split_windows(model):
+    model.set_split(2)
+    model.set_same_size(False)
+    boxes = model.view_snapshot().overlay
+    b0 = boxes[0].box
+    model.begin_drag(b0.x1, b0.y1, tol=3.0)       # deform window 1 away from the grid
+    model.update_drag(b0.x1 - 60, b0.y1 - 80)
+    model.end_drag()
+    model.rotate_pages()                          # §13: split grid re-laid on the rotated page
+    snap = model.view_snapshot()
+    grid = [ob.box for ob in snap.overlay]
+    assert len(grid) == 2
+    assert grid[0].width == pytest.approx(snap.page_w / 2)
+    assert grid[0].height == pytest.approx(snap.page_h)
+    assert grid[1].x0 == pytest.approx(snap.page_w / 2)
+
+
 def test_redetect_refreshes_committed_crop_keeps_it(model, run_job, select):
     select(model, "1")
     run_job(model.detect_content())

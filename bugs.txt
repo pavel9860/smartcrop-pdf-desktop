@@ -1,7 +1,27 @@
-All code changes are complete and syntactically correct. Pending issues that still need attention:
+1.  In advanced all offsets should be visible. Done
 
-Bug #9 (auto-detect second press broken) — needs live testing
-Bug #11 (right-click magnifies) — needs live testing
-Bug #14 (blinking segmented buttons) — needs fixing in _refresh_pages / _refresh_split
-Offset for bottom partially visible/ pr smaller then other.
-It should be no -- between app name and file name.
+2. There is no helpers on the set offsets and other items. Helpers should be for every item of the menu. Done
+3. “Compress document” name may be should be revised? The name is not the best. Done
+4. Order fro page split 1 top left, 2 bottom left, 3 top right, 4 bottom right. Done
+
+4. The info like page number, coordinates on the right bottom corner should be not on the separate field, but on the on the top of the opened page. (page should be down to the bottom of the window) Done.
+5. Some elements have size of font less then other. All fonts(except number of splits on the page) should have one size of the font. Including helpers. Done.
+
+6. The design of the crop windows should be like before.  Dashed window, bigrer square at the corner and moddle of the sides, 30% bigger then main font number of the splits in the cercles.  Done.
+
+7. Ratio windows should be populated by initial documents or drawn/ created crop window not empty. Should be adjusted just after auto detect, not after auto detect and firs page change in navigation. Done.
+8. Status bar is still palatially drawn during some processing, freezing with others. Scroll of the left tab also freezy.
+9. Auto detect does not work correctly on the second press. Autodetect should not have state and be in cache/undo/redo. It's prerequisite for crop.
+10. The navigation become slow.
+11. The right button still magnify the page, not to set the crop window. Windows creep. Standard bug with redraw.
+
+12. There is no name of the file/files on the top of the window. (len of the name should limited the name of the first file + … if there are many files.) Done
+13. Strength in filters not active before filter applied, it should can be selected before filter applied. Done
+14. Items All/Odd/Even/Selected in menu blink than I press anything. Other items blinked with some presses. Done.
+15. After I change page selection the stateful(dewrap, button should drop the state. Done.
+16. If I selected split to 2/4 pages the button crop should labeled Split & Crop Done
+17. Font size for output format selection is too small.  Done
+18. Page should be to the top and to the button without margins. Done
+19. Introduced: If I apply crop for 2/4 split, the right click trigger full page view and move 1st crop win.
+20. Pages in the right bottom corner shown if I press any button
+21. Keep ratio field crop numbers.Should be w

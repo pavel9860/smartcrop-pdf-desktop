@@ -165,7 +165,7 @@ def deskew(img: NDArr, angle: float, *, border: int = 255) -> NDArr:
         return img
     h, w = img.shape[:2]
     m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
-    out: NDArr = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC,  # type: ignore[call-overload]
+    out: NDArr = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC,
                                 borderMode=cv2.BORDER_CONSTANT, borderValue=border)
     return out
 
@@ -234,7 +234,8 @@ def sharpen_grayscale(img_bgr: NDArr, *, strength: int = 2, amount: float = 1.1,
             flat, cfg["d"], cfg["sigma_color"], cfg["sigma_space"])
     blur = cv2.GaussianBlur(flat, (0, 0), cfg["blur_sigma"])
     sharp = cv2.addWeighted(flat, 1.0 + amount, blur, -amount, 0)
-    return np.clip(sharp, 0, 255).astype(np.uint8)
+    out: NDArr = np.clip(sharp, 0, 255).astype(np.uint8)
+    return out
 
 
 # ------------------------------------------------------------------------ unwarp
@@ -247,6 +248,19 @@ def unwarp_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def unwarp_supersampled(bgr: NDArr, factor: float) -> NDArr:
+    """Mesh unwarp with the Dewarp-supersample lever (§10.1): render the remap at `factor`× and
+    downsample back, trading time for less resampling blur. `factor <= 1` runs plain unwarp."""
+    if factor <= 1.0:
+        return unwarp_bgr(bgr)
+    h, w = bgr.shape[:2]
+    up = cv2.resize(bgr, (round(w * factor), round(h * factor)), interpolation=cv2.INTER_CUBIC)
+    out = unwarp_bgr(up)
+    oh, ow = out.shape[:2]
+    return cv2.resize(out, (round(ow / factor), round(oh / factor)),
+                      interpolation=cv2.INTER_AREA)
 
 
 def unwarp_bgr(bgr: NDArr, *, providers: Tuple[str, ...] = ("CPUExecutionProvider",)) -> NDArr:

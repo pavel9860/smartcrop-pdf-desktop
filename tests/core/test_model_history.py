@@ -24,13 +24,16 @@ def test_undo_reverts_apply(model, run_job):
     assert _committed(model, 0)
 
 
-def test_undo_reverts_draw(model):
+def test_undo_reverts_committed_draw(model):
     model.begin_drag(40, 40, tol=3.0)
     model.update_drag(240, 540)
-    model.end_drag()
+    model.end_drag()                             # live window — not yet undoable state
+    assert model.can_undo is False
+    model.apply_crop()                           # the commit is the undoable step (§9.4, §12.2)
     cropped = model.view_snapshot().page_w
     model.undo()
-    assert model.view_snapshot().page_w != cropped
+    assert model.view_snapshot().page_w != cropped   # full page again
+    assert model.view_snapshot().overlay             # …with the drawn window restored
 
 
 def test_undo_reverts_filter(scanned, run_job):
