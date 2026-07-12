@@ -2,8 +2,9 @@
 core is Tk-free, ARCHITECTURE §2/§5.2). Mirror the spec exactly; no magic numbers inline in ui/.
 """
 from __future__ import annotations
+import sys
 
-APP_VERSION = "0.9.1"    # shown in Help → About (§16, inv 36); keep in sync with pyproject.toml
+APP_VERSION = "1.0.1"    # shown in Help → About (§16, inv 36); keep in sync with pyproject.toml
 
 # ── crop handle hit-test / drawing (page-unit tol = (HANDLE_R + HANDLE_SLACK) / scale) ───────
 HANDLE_R = 6
@@ -11,16 +12,22 @@ HANDLE_SLACK = 6
 CANVAS_MARGIN = 40
 
 # Cursor shown while hovering/dragging each handle (moved from core/geometry.py — a Tk concern).
-HANDLE_CURSOR: dict[str, str] = {
-    "NW": "size_nw_se", "SE": "size_nw_se", "NE": "size_ne_sw", "SW": "size_ne_sw",
-    "N": "sb_v_double_arrow", "S": "sb_v_double_arrow",
-    "E": "sb_h_double_arrow", "W": "sb_h_double_arrow",
+HANDLE_CURSOR = {
+    "NW": "size_nw_se" if sys.platform == "win32" else "top_left_corner",
+    "SE": "size_nw_se" if sys.platform == "win32" else "bottom_right_corner",
+    "NE": "size_ne_sw" if sys.platform == "win32" else "top_right_corner",
+    "SW": "size_ne_sw" if sys.platform == "win32" else "bottom_left_corner",
+    "N":  "size_ns"    if sys.platform == "win32" else "sb_v_double_arrow",
+    "S":  "size_ns"    if sys.platform == "win32" else "sb_v_double_arrow",
+    "E":  "size_we"    if sys.platform == "win32" else "sb_h_double_arrow",
+    "W":  "size_we"    if sys.platform == "win32" else "sb_h_double_arrow",
 }
+
 
 # ── window / panel geometry ───────────────────────────────────────────────────────────────────
 WINDOW_SIZE = "1560x1000"
 WINDOW_MIN = (1040, 700)
-PANEL_WIDTH = 320
+PANEL_WIDTH = 320 if sys.platform == "win32" else 420
 SETTINGS_MIN_W = 520
 
 # ── timings ────────────────────────────────────────────────────────────────────────────────────
@@ -44,9 +51,9 @@ SWITCH_W = 44            # CTkSwitch width in those rows (default 100 starves th
 # ── UI scale / font (Settings, §15) ──────────────────────────────────────────────────────────
 UI_SCALE_MIN = 0.7
 UI_SCALE_MAX = 2.0
-FONT_SIZE_MIN = 10
+FONT_SIZE_MIN = 8
 FONT_SIZE_MAX = 24
-DEFAULT_FONT_SIZE = 15
+DEFAULT_FONT_SIZE = 15 if sys.platform == "win32" else 10
 
 # ── split badge: numbered circle marking output order, top-left corner of each split window
 # (spec §9.6). A fixed point size like the other canvas marks (§19) — does not track

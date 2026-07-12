@@ -20,6 +20,7 @@ from ui.constants import RATIO_FIELD_W, ROW_LABEL_W, SWITCH_W, THEMES
 from ui.ui_build import (
     Fonts,
     _seg_kwargs,
+    _switch_kwargs,
     card,
     export_split_button,
     highlight_button,
@@ -106,7 +107,7 @@ class LeftPanel:
         self.mode_badge.pack(side="right", padx=(16, 0))
         body = ctk.CTkFrame(outer, fg_color="transparent")
         body.pack(fill="x", padx=12, pady=(0, 12))
-        self.btn_load = highlight_button(body, "Load PDF/Image Files",
+        self.btn_load = highlight_button(body, "📁 Load PDF/Image Files",
                                           self._cb.on_load_files, self.fonts)
         self.btn_load.pack(fill="x")
         tooltip(self.btn_load, "Open one or many PDFs/images, combined in pick order (Ctrl+O)",
@@ -252,7 +253,7 @@ class LeftPanel:
         self._same_size_var = tk.BooleanVar(value=self.model.same_size)
         self.switch_same_size = ctk.CTkSwitch(
             self.same_size_row, text="", width=SWITCH_W, variable=self._same_size_var,
-            font=self.fonts.base,
+            font=self.fonts.base, **_switch_kwargs(),
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_same_size(bool(self._same_size_var.get()))))
         self.switch_same_size.pack(side="left")
@@ -265,7 +266,7 @@ class LeftPanel:
         self._keep_ratio_var = tk.BooleanVar(value=self.model.keep_ratio)
         self.switch_keep_ratio = ctk.CTkSwitch(
             self.keep_ratio_row, text="", width=SWITCH_W, variable=self._keep_ratio_var,
-            font=self.fonts.base, command=self._on_keep_ratio_toggle)
+            font=self.fonts.base, **_switch_kwargs(), command=self._on_keep_ratio_toggle)
         self.switch_keep_ratio.pack(side="left")
         tooltip(self.switch_keep_ratio, "Lock crop height to width ÷ ratio", self.fonts)
         self.entry_ratio = ctk.CTkEntry(self.keep_ratio_row, width=RATIO_FIELD_W,
@@ -327,7 +328,7 @@ class LeftPanel:
         self._anchor_left_var = tk.BooleanVar(value=self.model.anchor_left)
         self.switch_anchor_left = ctk.CTkSwitch(
             row, text="Anchor Left", variable=self._anchor_left_var,
-            font=self.fonts.base, progress_color=THEMES["accent"],
+            font=self.fonts.base, progress_color=THEMES["accent"], **_switch_kwargs(),
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_anchor(left=bool(self._anchor_left_var.get()))))
         self.switch_anchor_left.pack(side="left", padx=(0, 16))
@@ -336,7 +337,7 @@ class LeftPanel:
         self._anchor_top_var = tk.BooleanVar(value=self.model.anchor_top)
         self.switch_anchor_top = ctk.CTkSwitch(
             row, text="Anchor Top", variable=self._anchor_top_var,
-            font=self.fonts.base, progress_color=THEMES["accent"],
+            font=self.fonts.base, progress_color=THEMES["accent"], **_switch_kwargs(),
             command=lambda: self._cb.dispatch(
                 lambda: self.model.set_anchor(top=bool(self._anchor_top_var.get()))))
         self.switch_anchor_top.pack(side="left")
@@ -409,7 +410,7 @@ class LeftPanel:
         outer, body = card(self.scroll, "Actions", self.fonts)
         outer.pack(fill="x", pady=(0, 10))
         self.btn_crop = highlight_button(
-            body, "✂  Crop",
+            body, "✂️  Crop",
             lambda: self._cb.dispatch(self.model.apply_crop), self.fonts)
         self.btn_crop.pack(fill="x")
         tooltip(self.btn_crop,
@@ -428,7 +429,7 @@ class LeftPanel:
 
     def _refresh_actions(self, busy: bool) -> None:
         m = self.model
-        set_text(self.btn_crop, "✂  Split & Crop" if m.split_count in (2, 4) else "✂  Crop")
+        set_text(self.btn_crop, "✂️  Split & Crop" if m.split_count in (2, 4) else "✂️  Crop")
         _set_state((self.btn_crop,), m.can_apply and not busy)
         enabled = m.has_document and not busy
         _set_state((self.btn_rotate, self.btn_delete), enabled)

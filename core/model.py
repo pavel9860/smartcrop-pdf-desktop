@@ -644,20 +644,60 @@ class AppModel:
     def _remove_colours(self) -> bool:
         return self.settings.output_colours == "Grayscale"
 
-    def _output_images(self, i: int) -> list[Image.Image]:
-        """Page i's committed output image(s); an uncommitted page still exports through its live
-        auto crop, never silently whole (§12.4). Shares render.output_image with the preview."""
+    def _export_boxes(self, i: int) -> list[Box]:
+        """Page i's committed output box(es); an uncommitted page still exports through its live
+        auto crop, never silently whole (§12.4)."""
+        if i in self.document.applied:
+            return self.document.applied[i]
+        cb = (self._drawn_on_page(i) or self._crop_rect(i)
+              if self.split_count == 1 else None)
+        if cb is not None:
+            return [cb]
+        w, h = self._page_dims(i)
+        return [Box(0, 0, w, h)]
+
+    def _box_points(self, box: Box) -> tuple[float, float]:
+        """`box` width/height in POINTS (1/72in) — `_page_dims` units are already points in
+        Normal mode, but pixels-at-SRC_DPI in Scanned mode, so only Scanned needs converting."""
+        if self.mode == Mode.SCANNED:
+            k = 72.0 / SRC_DPI
+            return box.width * k, box.height * k
+        return box.width, box.height
+
+    def _output_images(self, i: int) -> list[tuple[Image.Image, float, float]]:
+        """Page i's committed output image(s), each paired with its physical point size (bug #2
+        — that size, not the image's pixel count, is what a PDF page must be built at). Shares
+        render.output_image with the preview."""
         work = self._work_image(i)
         w, h = self._page_dims(i)
-        if i in self.document.applied:
-            boxes = self.document.applied[i]
-        else:                                    # §12.4: drawn window, else live auto, else whole
-            cb = (self._drawn_on_page(i) or self._crop_rect(i)
-                  if self.split_count == 1 else None)
-            boxes = [cb] if cb is not None else [Box(0, 0, w, h)]
         rc = self._remove_colours()
-        return [render.output_image(work, box, w, h, self._target_size(box.width, box.height), rc)
-                for box in boxes]
+        return [(render.output_image(work, box, w, h, self._target_size(box.width, box.height), rc),
+                 *self._box_points(box))
+                for box in self._export_boxes(i)]
+
+    def _can_export_native(self) -> bool:
+        """Vector-preserving PDF export (bug #1) applies only to a real Normal-mode PDF with no
+        raster-only setting selected — Compress/Grayscale have no native-PDF equivalent for
+        crop/rotate-only edits, so those fall back to the raster path."""
+        return (self.mode == Mode.NORMAL and self.doc is not None
+                and self.settings.compress_preset == "Original resolution"
+                and self.settings.output_colours == "Original colors")
+
+    def _to_native_box(self, i: int, box: Box) -> Box:
+        """Undo the accumulated 90° turns so `box` (in the current, possibly-rotated, page
+        frame every crop/detect box lives in) is expressed in page i's NATIVE (pre-rotation)
+        frame — the one PDF's /CropBox uses, since /Rotate is a display transform only and
+        never affects /CropBox coordinates."""
+        rot = self.document.rotation.get(i, 0) % 360
+        w, h = self._page_dims(i)
+        for _ in range((4 - rot // 90) % 4):      # rotate_box_cw is a 4-cycle (core/geometry.py)
+            box = rotate_box_cw(box, w, h)
+            w, h = h, w
+        return box
+
+    def _native_page_spec(self, i: int) -> list[tuple[Box, int]]:
+        rot = self.document.rotation.get(i, 0) % 360
+        return [(self._to_native_box(i, b), rot) for b in self._export_boxes(i)]
 
     def suggested_export_name(self) -> tuple[str, str]:
         base = (os.path.splitext(os.path.basename(self.input_paths[0]))[0]
@@ -680,7 +720,9 @@ class AppModel:
                     self.document.applied[i] = boxes
         pages = list(range(self.page_count()))
         if self.settings.export_format == "PDF":
-            return export.pdf_job(path, pages, self._render_page_outputs, self._page_is_bilevel)
+            if self._can_export_native():        # bug #1: keep vector content, no rasterize
+                return export.native_pdf_job(self.doc, path, pages, self._native_page_spec)
+            return export.pdf_job(path, pages, self._render_page_outputs_pdf, self._page_is_bilevel)
         return export.images_job(path, pages, self.settings.export_format,
                                  self._render_page_outputs)
 
@@ -690,6 +732,12 @@ class AppModel:
         return intent.filter is not None and intent.filter[0] == FilterMode.BW
 
     def _render_page_outputs(self, i: int) -> list[Image.Image]:
+        try:
+            return [img for img, _, _ in self._output_images(i)]
+        except Exception as exc:
+            raise ImagingError(f"Page {i + 1}: render failed ({exc}).") from exc
+
+    def _render_page_outputs_pdf(self, i: int) -> list[tuple[Image.Image, float, float]]:
         try:
             return self._output_images(i)
         except Exception as exc:

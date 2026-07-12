@@ -36,9 +36,36 @@ from ui.ui_build import (
     build_help_window,
     build_settings_window,
     highlight_button,
+    native_open_files,
+    native_save_file,
     set_entry_text,
     tooltip,
 )
+
+
+def _patch_ctk_scrollable_frame_wheel_guard() -> None:
+    """CustomTkinter's CTkScrollableFrame binds mouse-wheel handling with `bind_all` — i.e.
+    application-wide, every window, not just its own — and decides whether to act by walking
+    `event.widget.master` up the tree (`ctk_scrollable_frame.py::_check_if_valid_scroll`). Any
+    time the wheel fires over a window Tk built purely in Tcl (never wrapped by a Python widget
+    class) — which is exactly what Tk's own stock/native file & folder dialogs are — CPython's
+    own event substitution hands back the raw Tcl path *string* instead of a widget object
+    (`tkinter/__init__.py Misc._substitute`: `except KeyError: e.widget = W`); CTk's `.master`
+    walk then crashes with `AttributeError: 'str' object has no attribute 'master'`, uncaught,
+    anywhere the wheel is touched over such a window (reproduced: scrolling inside Load Files).
+    Not ours to fix upstream — patched defensively so it just means "don't scroll" instead of
+    crashing the app."""
+    orig = ctk.CTkScrollableFrame._check_if_valid_scroll
+
+    def _safe_check_if_valid_scroll(self: ctk.CTkScrollableFrame, widget: object) -> bool:
+        if not hasattr(widget, "master"):
+            return False
+        return orig(self, widget)
+
+    ctk.CTkScrollableFrame._check_if_valid_scroll = _safe_check_if_valid_scroll
+
+
+_patch_ctk_scrollable_frame_wheel_guard()
 
 
 class SmartCropApp:
@@ -243,8 +270,18 @@ class SmartCropApp:
 
     # ── commands needing a dialog (load / export / delete) ───────────────────
     def _load_files(self) -> None:
-        patterns = " ".join(f"*{ext}" for ext in IMAGE_LOAD_EXT)
-        paths = filedialog.askopenfilenames(filetypes=[("PDF and images", patterns)])
+        patterns = [f"*{ext}" for ext in IMAGE_LOAD_EXT]
+        native = native_open_files("Load PDF/Image Files", "PDF and images", patterns)
+        if native is not None:
+            paths: list[str] = native
+        else:
+            raw = filedialog.askopenfilenames(parent=self.root,
+                                               filetypes=[("PDF and images", " ".join(patterns))])
+            # askopenfilenames() returns a tuple on most modern Tk builds, but a single Tcl-list
+            # string on some (older Tk, or when tk.wantobjects() is off) — list(raw) on a str
+            # silently explodes it into one-character "paths" instead of raising, so normalize
+            # via splitlist (which also correctly un-braces names containing spaces).
+            paths = list(self.root.tk.splitlist(raw)) if isinstance(raw, str) else list(raw)
         if paths:
             self.dispatch(lambda: self.model.load_files(list(paths)))
         self._update_title()
@@ -266,8 +303,13 @@ class SmartCropApp:
 
     def _export(self) -> None:
         name, folder = self.model.suggested_export_name()
-        path_str = filedialog.asksaveasfilename(initialdir=folder or None, initialfile=name,
-                                                  defaultextension=Path(name).suffix)
+        native = native_save_file("Export", folder, name)
+        if native is not None:
+            path_str = native
+        else:
+            path_str = filedialog.asksaveasfilename(
+                parent=self.root, initialdir=folder or None, initialfile=name,
+                defaultextension=Path(name).suffix)
         if not path_str:
             return
         path = Path(path_str)

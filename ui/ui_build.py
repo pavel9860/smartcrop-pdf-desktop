@@ -1,6 +1,9 @@
 """Widget construction helpers — build separate from logic."""
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import filedialog
@@ -20,6 +23,91 @@ from ui.constants import (
     UI_SCALE_MIN,
 )
 from ui.help_content import INTRO, SECTIONS
+
+
+# ── native OS dialogs (zenity/kdialog) ──────────────────────────────────────
+# Tk's stock filedialog is drawn entirely by Tcl (tkfbox.tcl) on a standard Tk 8.6 build — it
+# has no GTK/portal integration, so it always shows that same unstyled dialog (wrong theme, no
+# "up" navigation) regardless of `parent=`; that's a Tk-build limitation, not something fixable
+# by passing different arguments to askopenfilename/asksaveasfilename/askdirectory. Where the
+# desktop provides zenity (GNOME/GTK) or kdialog (KDE), shell out to that instead for a real
+# native-looking picker, falling back to Tk's dialog only if neither is installed.
+#
+# Return convention, so callers can tell "no answer" apart from "couldn't use this at all":
+#   None            → neither tool found, or it failed for a reason other than a plain cancel;
+#                     caller should fall back to tkinter.filedialog.
+#   "" / []         → the native tool ran fine and the user cancelled — a real answer; the
+#                     caller must NOT then also open the Tk fallback.
+#   str / list[str] → the chosen path(s).
+def _zenity() -> str | None:
+    return shutil.which("zenity")
+
+
+def _kdialog() -> str | None:
+    return shutil.which("kdialog")
+
+
+def native_open_files(title: str, filter_label: str, patterns: list[str]) -> list[str] | None:
+    zenity = _zenity()
+    if zenity is not None:
+        cmd = [zenity, "--file-selection", "--multiple", "--separator=\n", f"--title={title}",
+               f"--file-filter={filter_label} | {' '.join(patterns)}"]
+    else:
+        kdialog = _kdialog()
+        if kdialog is None:
+            return None
+        cmd = [kdialog, "--multiple", "--separate-output", "--title", title,
+               "--getopenfilename", ".", f"{' '.join(patterns)}|{filter_label}"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except OSError:
+        return None
+    if r.returncode == 0:
+        return [p for p in r.stdout.splitlines() if p]
+    if r.returncode == 1:
+        return []
+    return None
+
+
+def native_save_file(title: str, initial_dir: str, initial_name: str) -> str | None:
+    initial = os.path.join(initial_dir, initial_name) if initial_dir else initial_name
+    zenity = _zenity()
+    if zenity is not None:
+        cmd = [zenity, "--file-selection", "--save", f"--filename={initial}", f"--title={title}"]
+    else:
+        kdialog = _kdialog()
+        if kdialog is None:
+            return None
+        cmd = [kdialog, "--title", title, "--getsavefilename", initial]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except OSError:
+        return None
+    if r.returncode == 0:
+        return r.stdout.strip()
+    if r.returncode == 1:
+        return ""
+    return None
+
+
+def native_pick_directory(title: str) -> str | None:
+    zenity = _zenity()
+    if zenity is not None:
+        cmd = [zenity, "--file-selection", "--directory", f"--title={title}"]
+    else:
+        kdialog = _kdialog()
+        if kdialog is None:
+            return None
+        cmd = [kdialog, "--title", title, "--getexistingdirectory", "."]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except OSError:
+        return None
+    if r.returncode == 0:
+        return r.stdout.strip()
+    if r.returncode == 1:
+        return ""
+    return None
 
 
 class Fonts:
@@ -48,6 +136,12 @@ class Tooltip:
         try:
             widget.bind("<Enter>", self._show, add="+")
             widget.bind("<Leave>", self._hide, add="+")
+            # A click that opens a dialog (Load/Export) without the pointer moving away first
+            # never fires <Leave> — the override-redirect tooltip popup then stays floating over
+            # the new window, since nothing tells it to go away. <Button-1> (press) always fires
+            # before CTkButton's own <ButtonRelease-1>-bound command, so hiding here guarantees
+            # the tooltip is gone before any dialog it triggers can appear.
+            widget.bind("<Button-1>", self._hide, add="+")
             widget.bind("<Destroy>", self._destroy, add="+")
         except NotImplementedError:
             pass                     # widget doesn't support bind; no tooltip
@@ -192,6 +286,7 @@ def build_settings_window(parent: ctk.CTk, settings: Settings, ui_config: UIConf
                            on_format: Callable[[str], None],
                            on_undo_depth: Callable[[int], None]) -> ctk.CTkToplevel:
     win = ctk.CTkToplevel(parent)
+    win.withdraw()                     # build off-screen — no visible jump when geometry lands
     win.title("Settings — SmartCrop PDF")
     win.transient(parent)
     body = ctk.CTkFrame(win, fg_color="transparent")
@@ -209,12 +304,16 @@ def build_settings_window(parent: ctk.CTk, settings: Settings, ui_config: UIConf
     h = body.winfo_reqheight() + 40
     win.geometry(f"{w}x{h}+{parent.winfo_rootx()}+{parent.winfo_rooty()}")
     win.minsize(w, h)
+    win.deiconify()
     return win
 
 
 def _seg_kwargs() -> dict[str, object]:
-    """Shared CTkSegmentedButton theme kwargs."""
+    """Shared CTkSegmentedButton theme kwargs. corner_radius is explicit (not the CTk theme
+    default of 6, which reads flatter/more rectangular than a native OS segmented control) —
+    matches the app's own card corner_radius=10 for a consistent, more rounded look."""
     return dict(
+        corner_radius=10,
         selected_color=THEMES["accent"],
         selected_hover_color=THEMES["accent_hover"],
         unselected_color=THEMES["seg_unsel"],
@@ -222,6 +321,14 @@ def _seg_kwargs() -> dict[str, object]:
         text_color=THEMES["accent_text"],
         text_color_disabled=THEMES["muted"],
     )
+
+
+def _switch_kwargs() -> dict[str, object]:
+    """Shared CTkSwitch theme kwargs. corner_radius=1000 is explicit rather than left to the
+    installed CTk theme's default — CTk clamps it internally to a full pill/stadium shape, so
+    this guarantees the modern rounded-switch look regardless of theme/version, instead of
+    depending on whatever corner_radius a given customtkinter theme happens to ship with."""
+    return dict(corner_radius=1000)
 
 
 def _appearance_section(body: ctk.CTkBaseClass, ui_config: UIConfig, fonts: Fonts,
@@ -300,7 +407,8 @@ def _output_section(body: ctk.CTkBaseClass, settings: Settings, fonts: Fonts,
 
 
 def _pick_folder(parent: ctk.CTkBaseClass, entry: ctk.CTkEntry, settings: Settings) -> None:
-    chosen = filedialog.askdirectory(parent=parent)
+    native = native_pick_directory("Select Output Folder")
+    chosen = native if native is not None else filedialog.askdirectory(parent=parent)
     if chosen:
         settings.output_folder = chosen
         set_entry_text(entry, chosen)
@@ -368,7 +476,7 @@ def _settings_switch(parent: ctk.CTkBaseClass, label: str, on: bool, fonts: Font
     row = _srow(parent, label, fonts)
     var = tk.BooleanVar(value=on)
     ctk.CTkSwitch(row, text="", variable=var, font=fonts.base,
-                  progress_color=THEMES["accent"],
+                  progress_color=THEMES["accent"], **_switch_kwargs(),
                   command=lambda: apply(bool(var.get()))).pack(side="right")
     row.pack(fill="x", pady=4)
 

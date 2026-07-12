@@ -3,4 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="uv (SmartCroPDF)" />
   </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.14 (smartcrop-pdf-desktop)" project-jdk-type="Python SDK" />
 </project>

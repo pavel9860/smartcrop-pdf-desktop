@@ -10,7 +10,7 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import fitz
 from PIL import Image
@@ -18,10 +18,17 @@ from PIL import Image
 from core.batch import PageJob
 from core.constants import JPEG_QUALITY
 from core.errors import ImagingError
+from core.geometry import Box
 
 FMT_EXT = {"PDF": "pdf", "JPG": "jpg", "PNG": "png", "TIFF": "tif"}
 
 RenderOutputs = Callable[[int], list[Image.Image]]
+# Each item pairs a raster page image with its physical size in POINTS (1/72in) — the unit
+# `fitz.Document.new_page` expects for its /MediaBox, which is NOT pixels (bug #2).
+RenderOutputsPdf = Callable[[int], list[tuple[Image.Image, float, float]]]
+# Per output page: the crop box in the source page's NATIVE (pre-rotation) coordinate frame,
+# and the rotation (degrees CW) to stamp as /Rotate — used by the vector-preserving path (#1).
+NativePageSpec = Callable[[int], list[tuple[Box, int]]]
 
 
 def encode_pdf_stream(img: Image.Image, bilevel: bool) -> bytes:
@@ -35,15 +42,51 @@ def encode_pdf_stream(img: Image.Image, bilevel: bool) -> bytes:
     return buf.getvalue()
 
 
-def pdf_job(path: Path, pages: list[int], render_outputs: RenderOutputs,
+def pdf_job(path: Path, pages: list[int], render_outputs: RenderOutputsPdf,
             is_bilevel: Callable[[int], bool]) -> PageJob:
-    """One PDF; each output page an embedded image page; garbage-collected + deflated on save."""
+    """One PDF; each output page an embedded image page, sized to its physical crop in points
+    (NOT the image's pixel count — new_page()'s width/height is a /MediaBox size in 1/72in;
+    passing pixels there silently pins every page to a fixed 72dpi regardless of Compress,
+    bug #2). Garbage-collected + deflated on save."""
     out_doc = fitz.open()
 
     def step(i: int) -> None:                 # one page of pixels resident at a time (§12.5)
-        for img in render_outputs(i):
-            pg = out_doc.new_page(width=img.width, height=img.height)
+        for img, pt_w, pt_h in render_outputs(i):
+            pg = out_doc.new_page(width=pt_w, height=pt_h)
             pg.insert_image(pg.rect, stream=encode_pdf_stream(img, is_bilevel(i)))
+
+    def save() -> None:
+        try:
+            out_doc.save(str(path), garbage=4, deflate=True)
+        except (OSError, RuntimeError) as exc:      # disk full / bad path → routed via Failed
+            raise ImagingError(f"Export failed: {exc}") from exc
+        finally:
+            out_doc.close()
+
+    def discard() -> None:                    # cancel before save → drop the in-progress doc
+        if not out_doc.is_closed:
+            out_doc.close()
+
+    return PageJob("Exporting pages", pages, step, save, discard)
+
+
+def native_pdf_job(src_doc: Any, path: Path, pages: list[int],
+                    page_spec: NativePageSpec) -> PageJob:
+    """Vector-preserving PDF export (Normal mode, no Compress/Grayscale, §12): crop and rotate
+    are applied as native /CropBox + /Rotate on a copy of the source page — text and vector
+    graphics are never rasterized. One source page copied per output box (a split page is
+    copied once per rectangle); `box` must already be in the source page's NATIVE (pre-rotation)
+    coordinate frame, since /CropBox is unaffected by /Rotate — the caller is responsible for
+    that conversion."""
+    out_doc = fitz.open()
+
+    def step(i: int) -> None:
+        for box, rot in page_spec(i):
+            out_doc.insert_pdf(src_doc, from_page=i, to_page=i)
+            pg = out_doc[-1]
+            pg.set_cropbox(fitz.Rect(box.x0, box.y0, box.x1, box.y1))
+            if rot:
+                pg.set_rotation(rot)
 
     def save() -> None:
         try:

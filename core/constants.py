@@ -34,5 +34,15 @@ OFFSET_LIMIT = 100.0       # max |offset| as a percent of the page dimension
 # ── filter / output ───────────────────────────────────────────────────────────
 CLEAN_AMOUNT: dict[int, float] = {1: 0.6, 2: 1.1, 3: 1.6}    # Sharpen unsharp amount per strength
 JPEG_QUALITY = 88          # JPG export quality (§12.7)
+# ── paper sizes ────────────────────────────────────────────────────────────────
+# ISO 216, portrait, in points (1 pt = 1/72 in; mm -> pt via *72/25.4).
+PAPER_SIZES: dict[str, tuple[float, float]] = {
+    "A2": (1190.6, 1683.8),
+    "A3": (841.9, 1190.6),
+    "A4": (595.3, 841.9),
+    "A5": (419.5, 595.3),
+    "A6": (297.6, 419.5),
+}
+DEFAULT_PAPER_SIZE = "A4"
 # ── synthetic placeholder document ────────────────────────────────────────────
 SYNTH_PAGES = 24           # pages in the synthetic placeholder document
